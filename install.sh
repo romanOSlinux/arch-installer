@@ -1,6 +1,6 @@
 #!/bin/bash
 # Arch Linux Auto Installer with KDE Plasma Minimal
-# Detects BIOS/UEFI, CPU and GPU automatically
+# Improved version with network error handling
 
 set -euo pipefail
 
@@ -34,6 +34,74 @@ log() {
     echo -e "${timestamp} [${level}] ${message}" | tee -a "$LOG_FILE"
 }
 
+# Check internet connection
+check_internet() {
+    log "INFO" "Verificando conexión a Internet..."
+    
+    # Try multiple methods to check internet
+    if ping -c 3 -W 5 8.8.8.8 &>/dev/null || \
+       ping -c 3 -W 5 archlinux.org &>/dev/null || \
+       curl -s --connect-timeout 10 https://archlinux.org &>/dev/null; then
+        log "INFO" "Conexión a Internet verificada"
+        return 0
+    else
+        log "ERROR" "No hay conexión a Internet"
+        return 1
+    fi
+}
+
+# Setup network if needed
+setup_network() {
+    log "INFO" "Configurando conexión de red..."
+    
+    # Check if network is already up
+    if check_internet; then
+        return 0
+    fi
+    
+    echo -e "${YELLOW}Configuración de red requerida${NC}"
+    echo -e "Selecciona tu tipo de conexión:"
+    echo "1) Ethernet cableada (DHCP)"
+    echo "2) WiFi"
+    echo "3) Ya tengo conexión"
+    read -p "Opción [1-3]: " net_choice
+    
+    case $net_choice in
+        1)
+            log "INFO" "Configurando Ethernet..."
+            ip link set $(ip link | grep -E '^[0-9]+: en' | head -1 | cut -d: -f2 | xargs) up
+            dhcpcd 2>/dev/null || systemctl start dhcpcd 2>/dev/null || true
+            sleep 5
+            ;;
+        2)
+            log "INFO" "Configurando WiFi..."
+            echo -e "${YELLOW}Usa iwctl para conectar WiFi:${NC}"
+            echo "Comandos útiles:"
+            echo "  iwctl station wlan0 scan"
+            echo "  iwctl station wlan0 get-networks"
+            echo "  iwctl station wlan0 connect SSID"
+            echo -e "${BLUE}Presiona Enter cuando tengas conexión...${NC}"
+            read
+            ;;
+        3)
+            log "INFO" "Asumiendo conexión existente"
+            ;;
+    esac
+    
+    # Test connection again
+    if ! check_internet; then
+        echo -e "${RED}ERROR: No se pudo establecer conexión a Internet${NC}"
+        echo -e "${YELLOW}Configura DNS temporalmente:${NC}"
+        echo "nameserver 8.8.8.8" > /etc/resolv.conf
+        echo "nameserver 8.8.4.4" >> /etc/resolv.conf
+        
+        if ! check_internet; then
+            log "ERROR" "Imposible conectar a Internet. Verifica tu conexión."
+            exit 1
+        fi
+    fi
+}
+
 # Check if running as root
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -56,11 +124,10 @@ detect_system() {
     fi
     
     # Detect CPU vendor
-    CPU_VENDOR=$(grep -m1 -oP 'vendor_id\s*:\s*\K\w+' /proc/cpuinfo)
-    if [[ "$CPU_VENDOR" == "GenuineIntel" ]]; then
+    if grep -qm1 "GenuineIntel" /proc/cpuinfo; then
         CPU_VENDOR="intel"
         log "INFO" "CPU Intel detectado"
-    elif [[ "$CPU_VENDOR" == "AuthenticAMD" ]]; then
+    elif grep -qm1 "AuthenticAMD" /proc/cpuinfo; then
         CPU_VENDOR="amd"
         log "INFO" "CPU AMD detectado"
     else
@@ -69,13 +136,13 @@ detect_system() {
     fi
     
     # Detect GPU vendor
-    if lspci | grep -i "nvidia" &> /dev/null; then
+    if lspci | grep -qi "nvidia"; then
         GPU_VENDOR="nvidia"
         log "INFO" "GPU NVIDIA detectada"
-    elif lspci | grep -i "amd" &> /dev/null; then
+    elif lspci | grep -qi "amd" && lspci | grep -qi "radeon\|ati"; then
         GPU_VENDOR="amd"
         log "INFO" "GPU AMD detectada"
-    elif lspci | grep -i "intel" &> /dev/null; then
+    elif lspci | grep -qi "intel.*graphics"; then
         GPU_VENDOR="intel"
         log "INFO" "GPU Intel detectada"
     else
@@ -85,7 +152,7 @@ detect_system() {
     
     # Show available disks
     log "INFO" "Discos disponibles:"
-    lsblk -o NAME,SIZE,TYPE,MOUNTPOINT | grep -E "^sd|^nvme|^vd"
+    lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE | grep -E "^sd|^nvme|^vd"
 }
 
 # Get user input
@@ -94,7 +161,7 @@ get_user_input() {
     
     # Select disk
     echo -e "\n${YELLOW}Discos disponibles:${NC}"
-    lsblk -o NAME,SIZE,TYPE,MOUNTPOINT | grep -E "disk"
+    lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE | grep -E "disk"
     read -p "Ingresa el nombre del disco para instalar (ej: sda, nvme0n1): " DISK
     DISK="/dev/${DISK}"
     
@@ -111,6 +178,10 @@ get_user_input() {
     # Username
     while [[ -z "$USERNAME" ]]; do
         read -p "Nombre de usuario: " USERNAME
+        if [[ ! "$USERNAME" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+            echo -e "${RED}Nombre de usuario inválido. Solo letras minúsculas, números, '-' y '_'${NC}"
+            USERNAME=""
+        fi
     done
     
     # Passwords
@@ -118,24 +189,65 @@ get_user_input() {
         echo -n "Contraseña para root: "
         read -s ROOT_PASSWORD
         echo
+        if [[ ${#ROOT_PASSWORD} -lt 6 ]]; then
+            echo -e "${RED}La contraseña debe tener al menos 6 caracteres${NC}"
+            ROOT_PASSWORD=""
+        fi
     done
     
     while [[ -z "$USER_PASSWORD" ]]; do
         echo -n "Contraseña para $USERNAME: "
         read -s USER_PASSWORD
         echo
+        if [[ ${#USER_PASSWORD} -lt 6 ]]; then
+            echo -e "${RED}La contraseña debe tener al menos 6 caracteres${NC}"
+            USER_PASSWORD=""
+        fi
     done
     
     # Timezone
-    read -p "Zona horaria [America/Mexico_City]: " input
-    TIMEZONE="${input:-America/Mexico_City}"
+    echo -e "\n${YELLOW}Zonas horarias comunes:${NC}"
+    echo "1) America/Mexico_City"
+    echo "2) America/New_York"
+    echo "3) Europe/Madrid"
+    echo "4) America/Santiago"
+    echo "5) America/Buenos_Aires"
+    echo "6) Otra (ingresar manualmente)"
+    read -p "Selecciona [1-6]: " tz_choice
+    
+    case $tz_choice in
+        1) TIMEZONE="America/Mexico_City" ;;
+        2) TIMEZONE="America/New_York" ;;
+        3) TIMEZONE="Europe/Madrid" ;;
+        4) TIMEZONE="America/Santiago" ;;
+        5) TIMEZONE="America/Buenos_Aires" ;;
+        6) 
+            read -p "Ingresa zona horaria (ej: America/Lima): " TIMEZONE
+            [[ -z "$TIMEZONE" ]] && TIMEZONE="America/Mexico_City"
+            ;;
+        *) TIMEZONE="America/Mexico_City" ;;
+    esac
     
     # Swap size
-    read -p "Tamaño de swap en GB [8]: " input
-    SWAP_SIZE="${input:-8}"
+    mem_total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    mem_total_gb=$((mem_total / 1024 / 1024))
+    recommended_swap=$((mem_total_gb * 2))
+    
+    read -p "Tamaño de swap en GB [recomendado: $recommended_swap]: " input
+    SWAP_SIZE="${input:-$recommended_swap}"
     
     # Confirmation
+    echo -e "\n${RED}=== RESUMEN DE INSTALACIÓN ===${NC}"
+    echo "Disco: $DISK"
+    echo "Hostname: $HOSTNAME"
+    echo "Usuario: $USERNAME"
+    echo "Zona horaria: $TIMEZONE"
+    echo "Swap: ${SWAP_SIZE}GB"
+    echo "Tipo de sistema: $([ $IS_UEFI -eq 1 ] && echo "UEFI" || echo "BIOS")"
+    echo "CPU: $CPU_VENDOR"
+    echo "GPU: $GPU_VENDOR"
     echo -e "\n${RED}ADVERTENCIA: Todos los datos en $DISK serán destruidos.${NC}"
+    
     read -p "¿Continuar con la instalación? (s/N): " confirm
     if [[ ! "$confirm" =~ ^[Ss]$ ]]; then
         log "INFO" "Instalación cancelada por el usuario"
@@ -143,22 +255,78 @@ get_user_input() {
     fi
 }
 
+# Update mirrors with fallback
+update_mirrors() {
+    log "INFO" "Actualizando lista de mirrors..."
+    
+    # Backup original mirrorlist
+    cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.backup 2>/dev/null || true
+    
+    # Try reflector with timeout and fallback
+    if command -v reflector &>/dev/null; then
+        # Try with 10 second timeout
+        timeout 10 reflector \
+            --verbose \
+            --latest 10 \
+            --protocol https \
+            --sort rate \
+            --save /etc/pacman.d/mirrorlist 2>>"$LOG_FILE" && {
+            log "INFO" "Mirrorlist actualizado con reflector"
+            return 0
+        } || {
+            log "WARN" "Reflector falló, usando mirrors alternativos"
+        }
+    fi
+    
+    # Fallback: Use known good mirrors
+    log "INFO" "Usando mirrors predefinidos..."
+    cat > /etc/pacman.d/mirrorlist << 'MIRRORLIST'
+## Arch Linux repository mirrorlist
+## Generated on $(date)
+## Fallback mirrors
+
+# Worldwide
+Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch
+Server = https://mirror.rackspace.com/archlinux/$repo/os/$arch
+Server = https://mirrors.kernel.org/archlinux/$repo/os/$arch
+Server = https://archlinux.mirror.liteserver.nl/$repo/os/$arch
+Server = https://mirror.f4st.host/archlinux/$repo/os/$arch
+
+# North America
+Server = https://mirror.csclub.uwaterloo.ca/archlinux/$repo/os/$arch
+Server = https://mirror.leaseweb.com/archlinux/$repo/os/$arch
+
+# Europe
+Server = https://archlinux.mirror.wearetriple.com/$repo/os/$arch
+Server = https://mirror.nl.leaseweb.net/archlinux/$repo/os/$arch
+
+# Asia
+Server = https://mirror.0x.sg/archlinux/$repo/os/$arch
+MIRRORLIST
+    
+    log "INFO" "Mirrorlist configurado con servidores alternativos"
+}
+
 # Partitioning
 partition_disk() {
     log "INFO" "Creando particiones en $DISK..."
     
+    # Unmount any mounted partitions
+    umount -R /mnt 2>/dev/null || true
+    swapoff -a 2>/dev/null || true
+    
     # Clear existing partition table
-    sgdisk -Z "$DISK"
+    log "INFO" "Limpiando tabla de particiones..."
+    wipefs -a -f "$DISK" 2>/dev/null || true
+    sgdisk -Z "$DISK" 2>/dev/null || dd if=/dev/zero of="$DISK" bs=1M count=100 2>/dev/null
     partprobe "$DISK"
+    sleep 2
     
     if [[ $IS_UEFI -eq 1 ]]; then
         # UEFI partitioning
         log "INFO" "Creando tabla de particiones GPT para UEFI"
         
         # Create partitions
-        # 1: EFI system partition (512M)
-        # 2: Swap partition
-        # 3: Root partition (rest of disk)
         sgdisk -n 1:0:+512M -t 1:ef00 -c 1:"EFI System" "$DISK"
         sgdisk -n 2:0:+${SWAP_SIZE}G -t 2:8200 -c 2:"Linux swap" "$DISK"
         sgdisk -n 3:0:0 -t 3:8304 -c 3:"Linux root" "$DISK"
@@ -176,9 +344,9 @@ partition_disk() {
         
         # Format partitions
         log "INFO" "Formateando particiones..."
-        mkfs.fat -F32 "$EFI_PART"
-        mkswap "$SWAP_PART"
-        mkfs.ext4 "$ROOT_PART"
+        mkfs.fat -F32 "$EFI_PART" 2>>"$LOG_FILE"
+        mkswap "$SWAP_PART" 2>>"$LOG_FILE"
+        mkfs.ext4 -F "$ROOT_PART" 2>>"$LOG_FILE"
         
         # Mount partitions
         swapon "$SWAP_PART"
@@ -190,7 +358,7 @@ partition_disk() {
         log "INFO" "Creando tabla de particiones MBR para BIOS"
         
         # Create partitions using fdisk
-        echo -e "o\nn\np\n1\n\n+512M\nn\np\n2\n\n+${SWAP_SIZE}G\nn\np\n3\n\n\nt\n2\n82\nw" | fdisk "$DISK"
+        echo -e "o\nn\np\n1\n\n+512M\nn\np\n2\n\n+${SWAP_SIZE}G\nt\n2\n82\nn\np\n3\n\n\nw" | fdisk -W always "$DISK"
         
         # Set partition variables
         if [[ "$DISK" =~ "nvme" ]]; then
@@ -205,9 +373,9 @@ partition_disk() {
         
         # Format partitions
         log "INFO" "Formateando particiones..."
-        mkfs.ext4 "$BOOT_PART"
-        mkswap "$SWAP_PART"
-        mkfs.ext4 "$ROOT_PART"
+        mkfs.ext4 -F "$BOOT_PART" 2>>"$LOG_FILE"
+        mkswap "$SWAP_PART" 2>>"$LOG_FILE"
+        mkfs.ext4 -F "$ROOT_PART" 2>>"$LOG_FILE"
         
         # Mount partitions
         swapon "$SWAP_PART"
@@ -223,29 +391,60 @@ partition_disk() {
 install_base() {
     log "INFO" "Instalando sistema base..."
     
-    # Update mirrorlist
-    log "INFO" "Actualizando mirrorlist..."
-    reflector --country 'United States' --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
+    # Update mirrorlist with fallback
+    update_mirrors
+    
+    # Update pacman database with retry
+    log "INFO" "Actualizando base de datos de pacman..."
+    for i in {1..3}; do
+        if pacman -Syy --noconfirm 2>>"$LOG_FILE"; then
+            log "INFO" "Base de datos actualizada en intento $i"
+            break
+        else
+            log "WARN" "Intento $i fallado, reintentando..."
+            sleep 2
+            if [[ $i -eq 3 ]]; then
+                log "ERROR" "No se pudo actualizar la base de datos"
+                exit 1
+            fi
+        fi
+    done
     
     # Install base packages
-    pacstrap /mnt base base-devel linux linux-firmware
+    log "INFO" "Instalando paquetes base..."
+    if ! pacstrap /mnt base base-devel linux linux-firmware 2>>"$LOG_FILE"; then
+        log "ERROR" "Falló la instalación base. Verificando dependencias..."
+        
+        # Try minimal installation first
+        pacstrap /mnt base linux linux-firmware 2>>"$LOG_FILE" || {
+            log "ERROR" "Instalación mínima fallada. Verifica conexión y mirrors."
+            exit 1
+        }
+        
+        # Install base-devel later
+        arch-chroot /mnt pacman -S --noconfirm base-devel 2>>"$LOG_FILE"
+    fi
     
     # Generate fstab
-    genfstab -U /mnt >> /mnt/etc/fstab
+    genfstab -U /mnt >> /mnt/etc/fstab 2>>"$LOG_FILE"
     
     log "INFO" "Sistema base instalado"
 }
 
-# Configure system
+# Configure system (chroot script)
 configure_system() {
     log "INFO" "Configurando sistema..."
     
     # Create chroot script
-    cat > /mnt/configure.sh << 'EOF'
+    cat > /mnt/configure_system.sh << 'CHROOT_EOF'
 #!/bin/bash
 set -euo pipefail
 
-# Variables
+log() {
+    echo "[CHROOT] $1: $2"
+}
+
+# Read variables
 HOSTNAME="$1"
 USERNAME="$2"
 TIMEZONE="$3"
@@ -256,18 +455,25 @@ CPU_VENDOR="$7"
 GPU_VENDOR="$8"
 ROOT_PASSWORD="$9"
 USER_PASSWORD="${10}"
+DISK_DEVICE="${11}"
+
+# Setup logging
+exec 2>>/install.log
 
 # Set timezone
-ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+log "INFO" "Configurando zona horaria: $TIMEZONE"
+timedatectl set-timezone "$TIMEZONE"
 hwclock --systohc
 
 # Localization
+log "INFO" "Configurando localización"
 echo "LANG=$LOCALE" > /etc/locale.conf
 echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
 sed -i "s/^#${LOCALE}/${LOCALE}/" /etc/locale.gen
 locale-gen
 
 # Network configuration
+log "INFO" "Configurando red"
 echo "$HOSTNAME" > /etc/hostname
 cat > /etc/hosts << HOSTS_EOF
 127.0.0.1   localhost
@@ -276,55 +482,66 @@ cat > /etc/hosts << HOSTS_EOF
 HOSTS_EOF
 
 # Set root password
+log "INFO" "Configurando contraseña de root"
 echo "root:$ROOT_PASSWORD" | chpasswd
 
-# Create user and set password
+# Create user
+log "INFO" "Creando usuario: $USERNAME"
 useradd -m -G wheel,audio,video,storage -s /bin/bash "$USERNAME"
 echo "$USERNAME:$USER_PASSWORD" | chpasswd
 
 # Configure sudoers
+log "INFO" "Configurando sudoers"
 echo "%wheel ALL=(ALL) ALL" >> /etc/sudoers
+echo "Defaults timestamp_timeout=30" >> /etc/sudoers
 
-# Install basic packages
-pacman -Sy --noconfirm \
+# Install essential packages
+log "INFO" "Instalando paquetes esenciales"
+pacman -Sy --noconfirm --needed \
     networkmanager \
     grub \
     efibootmgr \
     dosfstools \
-    mtools \
+    os-prober \
     git \
     curl \
     wget \
     nano \
     vim \
     htop \
-    neofetch
+    neofetch \
+    man-db \
+    man-pages \
+    texinfo 2>/dev/null
 
 # Install CPU microcode
+log "INFO" "Instalando microcódigo para CPU: $CPU_VENDOR"
 if [[ "$CPU_VENDOR" == "intel" ]]; then
-    pacman -S --noconfirm intel-ucode
+    pacman -S --noconfirm intel-ucode 2>/dev/null
 elif [[ "$CPU_VENDOR" == "amd" ]]; then
-    pacman -S --noconfirm amd-ucode
+    pacman -S --noconfirm amd-ucode 2>/dev/null
 fi
 
 # Install GPU drivers
+log "INFO" "Instalando drivers para GPU: $GPU_VENDOR"
 case "$GPU_VENDOR" in
     "nvidia")
-        pacman -S --noconfirm nvidia nvidia-utils nvidia-settings
+        pacman -S --noconfirm nvidia nvidia-utils nvidia-settings 2>/dev/null
         ;;
     "amd")
-        pacman -S --noconfirm xf86-video-amdgpu mesa vulkan-radeon
+        pacman -S --noconfirm mesa vulkan-radeon xf86-video-amdgpu 2>/dev/null
         ;;
     "intel")
-        pacman -S --noconfirm xf86-video-intel mesa vulkan-intel
+        pacman -S --noconfirm mesa vulkan-intel xf86-video-intel 2>/dev/null
         ;;
     *)
-        pacman -S --noconfirm mesa
+        pacman -S --noconfirm mesa 2>/dev/null
         ;;
 esac
 
 # Install KDE Plasma Minimal
-pacman -S --noconfirm \
+log "INFO" "Instalando KDE Plasma Minimal"
+pacman -S --noconfirm --needed \
     plasma-desktop \
     plasma-nm \
     plasma-pa \
@@ -333,7 +550,6 @@ pacman -S --noconfirm \
     kate \
     kdegraphics-thumbnailers \
     ffmpegthumbs \
-    gwenview \
     sddm \
     sddm-kcm \
     ark \
@@ -342,7 +558,6 @@ pacman -S --noconfirm \
     print-manager \
     cups \
     cups-pdf \
-    system-config-printer \
     firefox \
     noto-fonts \
     noto-fonts-cjk \
@@ -356,47 +571,56 @@ pacman -S --noconfirm \
     papirus-icon-theme \
     breeze-gtk \
     xdg-user-dirs \
-    xdg-utils
+    xdg-utils 2>/dev/null
 
-# Enable NetworkManager
+# Enable services
+log "INFO" "Habilitando servicios"
 systemctl enable NetworkManager
 systemctl enable sddm
 systemctl enable cups
 
 # Install GRUB
+log "INFO" "Instalando GRUB"
 if [[ "$IS_UEFI" -eq 1 ]]; then
-    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
+    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck 2>/dev/null
 else
-    grub-install --target=i386-pc "$DISK_DEVICE"
+    grub-install --target=i386-pc "$DISK_DEVICE" --recheck 2>/dev/null
 fi
 
 # Configure GRUB
+log "INFO" "Configurando GRUB"
 if [[ "$CPU_VENDOR" == "intel" ]]; then
     sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT="/&intel_iommu=on /' /etc/default/grub
 elif [[ "$CPU_VENDOR" == "amd" ]]; then
     sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT="/&amd_iommu=on /' /etc/default/grub
 fi
 
-grub-mkconfig -o /boot/grub/grub.cfg
+grub-mkconfig -o /boot/grub/grub.cfg 2>/dev/null
 
 # Create user directories
+log "INFO" "Creando directorios de usuario"
 sudo -u "$USERNAME" xdg-user-dirs-update
 
 # Configure audio
+log "INFO" "Configurando audio"
 echo "load-module module-switch-on-connect" >> /etc/pulse/default.pa
 
 # Clean up
-rm /configure.sh
-EOF
+log "INFO" "Limpiando instalación"
+rm -f /configure_system.sh
+
+log "INFO" "Configuración completada exitosamente"
+CHROOT_EOF
     
-    # Make script executable and run it
-    chmod +x /mnt/configure.sh
+    # Make script executable
+    chmod +x /mnt/configure_system.sh
     
     # Get disk device without partition number for BIOS install
     DISK_DEVICE=$(echo "$DISK" | sed 's/[0-9]*$//')
     
     # Run configuration in chroot
-    arch-chroot /mnt /configure.sh \
+    log "INFO" "Ejecutando configuración en chroot..."
+    arch-chroot /mnt /configure_system.sh \
         "$HOSTNAME" \
         "$USERNAME" \
         "$TIMEZONE" \
@@ -406,7 +630,8 @@ EOF
         "$CPU_VENDOR" \
         "$GPU_VENDOR" \
         "$ROOT_PASSWORD" \
-        "$USER_PASSWORD"
+        "$USER_PASSWORD" \
+        "$DISK_DEVICE" 2>>"$LOG_FILE"
     
     log "INFO" "Configuración completada"
 }
@@ -416,32 +641,65 @@ post_install() {
     log "INFO" "Realizando configuración post-instalación..."
     
     # Create post-install script for user
-    cat > /mnt/home/$USERNAME/post_install.sh << 'EOF'
+    cat > /mnt/home/$USERNAME/post_install.sh << 'POST_EOF'
 #!/bin/bash
-echo "Configuración post-instalación para $USERNAME"
+echo "=== Configuración Post-Instalación ==="
+echo "Usuario: $(whoami)"
+echo
 
-# Install yay (AUR helper)
-cd /tmp
-git clone https://aur.archlinux.org/yay.git
-cd yay
-makepkg -si --noconfirm
-cd ~
-rm -rf /tmp/yay
+# Create directories
+mkdir -p ~/{Downloads,Documents,Pictures,Music,Videos,Desktop,Public,Templates}
 
-# Install additional software via yay
-yay -S --noconfirm \
-    visual-studio-code-bin \
-    spotify \
-    discord \
-    latte-dock \
-    plasma5-applets-virtual-desktop-bar-git
+# Install yay (AUR helper) if not present
+if ! command -v yay &> /dev/null; then
+    echo "Instalando yay (AUR helper)..."
+    sudo pacman -S --needed --noconfirm git base-devel
+    cd /tmp
+    git clone https://aur.archlinux.org/yay.git
+    cd yay
+    makepkg -si --noconfirm
+    cd ~
+    rm -rf /tmp/yay
+fi
 
-# Configure Plasma
-echo "Puedes personalizar KDE Plasma desde:
-1. System Settings -> Appearance
-2. System Settings -> Workspace Behavior
-3. System Settings -> Shortcuts"
-EOF
+# Ask about additional software
+read -p "¿Instalar software adicional? (s/N): " install_extra
+if [[ "$install_extra" =~ ^[Ss]$ ]]; then
+    echo "Opciones de software:"
+    echo "1) Oficina (LibreOffice)"
+    echo "2) Multimedia (VLC, GIMP)"
+    echo "3) Desarrollo (VSCode, Docker)"
+    echo "4) Todo lo anterior"
+    read -p "Selecciona opción [1-4]: " software_choice
+    
+    case $software_choice in
+        1)
+            sudo pacman -S --noconfirm libreoffice-fresh
+            ;;
+        2)
+            sudo pacman -S --noconfirm vlc gimp
+            ;;
+        3)
+            sudo pacman -S --noconfirm code docker docker-compose
+            sudo systemctl enable docker
+            sudo usermod -aG docker $USER
+            ;;
+        4)
+            sudo pacman -S --noconfirm libreoffice-fresh vlc gimp code docker docker-compose
+            sudo systemctl enable docker
+            sudo usermod -aG docker $USER
+            ;;
+    esac
+fi
+
+echo "=== Configuración recomendada ==="
+echo "1. Configura KDE Plasma desde 'System Settings'"
+echo "2. Configura NetworkManager para tu red WiFi"
+echo "3. Actualiza el sistema regularmente: sudo pacman -Syu"
+echo "4. Instala AUR packages con: yay -S package-name"
+echo
+echo "Para reiniciar: sudo reboot"
+POST_EOF
     
     chmod +x /mnt/home/$USERNAME/post_install.sh
     chown $USERNAME:$USERNAME /mnt/home/$USERNAME/post_install.sh
@@ -452,22 +710,41 @@ EOF
     echo -e "${GREEN}========================================${NC}"
     echo -e "Hostname: $HOSTNAME"
     echo -e "Usuario: $USERNAME"
+    echo -e "Contraseña: ********"
     echo -e "Timezone: $TIMEZONE"
     echo -e "Tipo de sistema: $([ $IS_UEFI -eq 1 ] && echo "UEFI" || echo "BIOS")"
     echo -e "CPU: $CPU_VENDOR"
     echo -e "GPU: $GPU_VENDOR"
+    echo -e "Log de instalación: $LOG_FILE"
     echo -e "\n${YELLOW}Para configuraciones adicionales, ejecuta:${NC}"
     echo -e "sudo -u $USERNAME /home/$USERNAME/post_install.sh"
-    echo -e "\n${YELLOW}Reinicia el sistema:${NC}"
-    echo -e "umount -R /mnt"
-    echo -e "reboot"
+    echo -e "\n${YELLOW}Para reiniciar:${NC}"
+    echo -e "1. umount -R /mnt"
+    echo -e "2. reboot"
 }
 
-# Main function
+# Cleanup function
+cleanup() {
+    log "INFO" "Realizando limpieza..."
+    
+    # Unmount partitions
+    umount -R /mnt 2>/dev/null || true
+    swapoff -a 2>/dev/null || true
+    
+    # Remove temporary files
+    rm -f /mnt/configure_system.sh 2>/dev/null || true
+    
+    log "INFO" "Limpieza completada"
+}
+
+# Main function with error handling
 main() {
+    trap 'echo -e "${RED}Error en línea $LINENO. Ver log: $LOG_FILE${NC}"; cleanup; exit 1' ERR
+    
     echo -e "${BLUE}========================================${NC}"
     echo -e "${BLUE}   Arch Linux Auto Installer${NC}"
     echo -e "${BLUE}   con KDE Plasma Minimal${NC}"
+    echo -e "${BLUE}   (Versión mejorada con manejo de red)${NC}"
     echo -e "${BLUE}========================================${NC}"
     
     # Create log file
@@ -475,6 +752,9 @@ main() {
     
     # Check root
     check_root
+    
+    # Setup network
+    setup_network
     
     # Detect system
     detect_system
@@ -494,9 +774,22 @@ main() {
     # Post-installation
     post_install
     
+    # Cleanup
+    cleanup
+    
     # Final message
-    echo -e "\n${GREEN}Log de instalación guardado en: $LOG_FILE${NC}"
+    echo -e "\n${GREEN}========================================${NC}"
+    echo -e "${GREEN}Instalación finalizada!${NC}"
+    echo -e "${GREEN}Log guardado en: $LOG_FILE${NC}"
+    echo -e "\n${YELLOW}Pasos finales:${NC}"
+    echo -e "1. Desmontar: umount -R /mnt"
+    echo -e "2. Reiniciar: reboot"
+    echo -e "3. Retirar medio de instalación"
+    echo -e "4. Iniciar sesión con usuario: $USERNAME"
+    echo -e "${BLUE}========================================${NC}"
 }
 
 # Run main function
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
