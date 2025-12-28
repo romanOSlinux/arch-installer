@@ -38,6 +38,7 @@ declare -g AI_BOOT_PARTITION="${AI_TARGET}1"
 declare -g AI_ROOT_PARTITION="${AI_TARGET}2"
 declare -g AI_SWAP_PARTITION="${AI_TARGET}3"
 declare -g AI_LUKS_DEVICE="cryptroot"
+declare -g AI_UEFI=false
 
 # Paquetes base
 declare -ag AI_BASE_PACKAGES=(
@@ -450,24 +451,52 @@ install_base() {
     print_msg "success" "Sistema base instalado"
 }
 
-# Función para configurar sistema
-configure_system() {
-    print_msg "step" "Configurando sistema"
+# Función para configurar zona horaria y locales
+configure_timezone_locale() {
+    print_msg "step" "Configurando zona horaria y locales"
     
     # Configurar zona horaria
-    print_msg "info" "Configurando zona horaria..."
+    print_msg "info" "Configurando zona horaria: $AI_TIMEZONE"
     arch-chroot "$AI_MOUNTPOINT" ln -sf "/usr/share/zoneinfo/$AI_TIMEZONE" /etc/localtime
     arch-chroot "$AI_MOUNTPOINT" hwclock --systohc
     
     # Configurar locale
-    print_msg "info" "Configurando locale..."
-    sed -i "s/#$AI_LOCALE/$AI_LOCALE/" "$AI_MOUNTPOINT/etc/locale.gen"
+    print_msg "info" "Configurando locale: $AI_LOCALE"
+    
+    # Editar locale.gen - habilitar el locale especificado
+    if grep -q "^#$AI_LOCALE" "$AI_MOUNTPOINT/etc/locale.gen"; then
+        sed -i "s/^#$AI_LOCALE/$AI_LOCALE/" "$AI_MOUNTPOINT/etc/locale.gen"
+    else
+        # Si no existe, añadirlo
+        echo "$AI_LOCALE UTF-8" >> "$AI_MOUNTPOINT/etc/locale.gen"
+    fi
+    
+    # También habilitar algunos locales comunes por defecto
+    sed -i "s/^#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/" "$AI_MOUNTPOINT/etc/locale.gen"
+    
+    # Generar locales
     arch-chroot "$AI_MOUNTPOINT" locale-gen
+    
+    # Configurar LANG
     echo "LANG=$AI_LOCALE" > "$AI_MOUNTPOINT/etc/locale.conf"
+    
+    # Configurar teclado
+    print_msg "info" "Configurando teclado: $AI_KEYMAP"
     echo "KEYMAP=$AI_KEYMAP" > "$AI_MOUNTPOINT/etc/vconsole.conf"
     
+    # Configurar consola para español
+    echo "FONT=lat9w-16" >> "$AI_MOUNTPOINT/etc/vconsole.conf"
+    echo "FONT_MAP=" >> "$AI_MOUNTPOINT/etc/vconsole.conf"
+    
+    print_msg "success" "Zona horaria y locales configurados"
+}
+
+# Función para configurar sistema
+configure_system() {
+    print_msg "step" "Configurando sistema"
+    
     # Configurar hostname
-    print_msg "info" "Configurando hostname..."
+    print_msg "info" "Configurando hostname: $AI_HOST_NAME"
     echo "$AI_HOST_NAME" > "$AI_MOUNTPOINT/etc/hostname"
     
     # Configurar hosts
@@ -482,7 +511,7 @@ EOF
     echo "root:$AI_ROOT_PASSWORD" | arch-chroot "$AI_MOUNTPOINT" chpasswd
     
     # Crear usuario
-    print_msg "info" "Creando usuario..."
+    print_msg "info" "Creando usuario: $AI_USER_NAME"
     arch-chroot "$AI_MOUNTPOINT" useradd -m -G wheel,audio,video,storage,optical -s /bin/bash "$AI_USER_NAME"
     echo "$AI_USER_NAME:$AI_USER_PASSWORD" | arch-chroot "$AI_MOUNTPOINT" chpasswd
     
@@ -780,6 +809,28 @@ configure_manually() {
         AI_ROOT_PASSWORD="$input"
     fi
     
+    # Zona horaria
+    echo ""
+    echo "Zonas horarias comunes:"
+    echo "  Europe/Madrid, America/New_York, America/Mexico_City, Europe/London, Asia/Tokyo"
+    echo "  Ver zonas disponibles en: /usr/share/zoneinfo/"
+    read -r -p "Zona horaria [$AI_TIMEZONE]: " input
+    AI_TIMEZONE="${input:-$AI_TIMEZONE}"
+    
+    # Locale
+    echo ""
+    echo "Locales comunes:"
+    echo "  es_ES.UTF-8, en_US.UTF-8, en_GB.UTF-8, fr_FR.UTF-8, de_DE.UTF-8"
+    read -r -p "Locale [$AI_LOCALE]: " input
+    AI_LOCALE="${input:-$AI_LOCALE}"
+    
+    # Mapa de teclado
+    echo ""
+    echo "Mapas de teclado comunes:"
+    echo "  es (español), us (inglés US), la-latin1 (latinoamérica), fr (francés), de (alemán)"
+    read -r -p "Mapa de teclado [$AI_KEYMAP]: " input
+    AI_KEYMAP="${input:-$AI_KEYMAP}"
+    
     # Dispositivo
     echo ""
     echo "Dispositivos disponibles:"
@@ -831,6 +882,10 @@ configure_manually() {
     else
         AI_INSTALL_EXTRA=true
     fi
+    
+    # Tamaño de swap
+    read -r -p "Tamaño de swap en MB (0 para deshabilitar) [$AI_SWAP_SIZE]: " input
+    AI_SWAP_SIZE="${input:-$AI_SWAP_SIZE}"
     
     show_menu
 }
@@ -901,6 +956,9 @@ main_install() {
     # Instalar sistema base
     install_base || exit 1
     
+    # Configurar zona horaria y locales
+    configure_timezone_locale || exit 1
+    
     # Configurar sistema
     configure_system || exit 1
     
@@ -933,6 +991,9 @@ main_install() {
     echo "║ Hostname:          $AI_HOST_NAME                        ║"
     echo "║ Usuario:           $AI_USER_NAME                        ║"
     echo "║ Contraseña:        $AI_USER_PASSWORD                    ║"
+    echo "║ Zona horaria:      $AI_TIMEZONE                         ║"
+    echo "║ Locale:            $AI_LOCALE                           ║"
+    echo "║ Teclado:           $AI_KEYMAP                           ║"
     echo "║ Entorno:           $AI_DESKTOP_ENV                      ║"
     echo "║ Drivers:           $AI_GPU_DRIVER                       ║"
     echo "║ Cifrado:           $AI_ENCRYPT_DISK                     ║"
@@ -987,6 +1048,18 @@ while [[ $# -gt 0 ]]; do
             AI_TARGET="$2"
             shift 2
             ;;
+        --timezone)
+            AI_TIMEZONE="$2"
+            shift 2
+            ;;
+        --locale)
+            AI_LOCALE="$2"
+            shift 2
+            ;;
+        --keymap)
+            AI_KEYMAP="$2"
+            shift 2
+            ;;
         --desktop)
             AI_DESKTOP_ENV="$2"
             shift 2
@@ -1012,6 +1085,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --user USUARIO         Establecer nombre de usuario"
             echo "  --password CONTRASEÑA  Establecer contraseña de usuario"
             echo "  --target DISPOSITIVO   Dispositivo de instalación (ej: /dev/sda)"
+            echo "  --timezone ZONA        Zona horaria (ej: Europe/Madrid)"
+            echo "  --locale LOCALE        Locale (ej: es_ES.UTF-8)"
+            echo "  --keymap TECLADO       Mapa de teclado (ej: es)"
             echo "  --desktop ENTORNO      Entorno de escritorio (plasma-minimal, xfce, gnome, none)"
             echo "  --encrypt              Cifrar disco con LUKS"
             echo "  --skip-confirm         Saltar confirmaciones"
@@ -1021,6 +1097,7 @@ while [[ $# -gt 0 ]]; do
             echo "Ejemplos:"
             echo "  $0 --auto"
             echo "  $0 --target /dev/sda --desktop plasma-minimal --encrypt"
+            echo "  $0 --hostname miarch --locale es_ES.UTF-8 --keymap es --timezone Europe/Madrid"
             exit 0
             ;;
         *)
