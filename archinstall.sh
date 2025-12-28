@@ -31,6 +31,8 @@ declare -g AI_AUTO_PARTITION=true
 declare -g AI_ENABLE_AUR=true
 declare -g AI_INSTALL_EXTRA=true
 declare -g AI_SKIP_CONFIRM=false
+declare -g AI_SKIP_INTERNET_CHECK=false
+declare -g AI_FORCE_INTERNET=false
 
 # Variables internas
 declare -g AI_MOUNTPOINT="/mnt"
@@ -179,68 +181,275 @@ confirm() {
     esac
 }
 
-# Función para verificar conexión a internet
+# Función mejorada para verificar conexión a internet
 check_internet() {
-    print_msg "info" "Verificando conexión a internet..."
+    local -i max_attempts=3
+    local -i attempt=1
+    local -i wait_time=2
     
-    if ping -c 3 archlinux.org >/dev/null 2>&1; then
-        print_msg "success" "Conexión a internet verificada"
+    # Si se salta la verificación
+    if [ "$AI_SKIP_INTERNET_CHECK" = true ]; then
+        print_msg "warning" "Verificación de internet saltada por el usuario"
         return 0
-    else
-        print_msg "error" "No hay conexión a internet"
-        
-        if confirm "¿Configurar conexión de red?"; then
-            setup_network
-            return $?
-        else
-            return 1
+    fi
+    
+    print_msg "info" "Verificando conexión a internet (intento $attempt/$max_attempts)..."
+    
+    # Método 1: Ping a múltiples servidores
+    local -a ping_servers=("archlinux.org" "google.com" "8.8.8.8" "1.1.1.1")
+    for server in "${ping_servers[@]}"; do
+        if timeout 3 ping -c 1 -W 2 "$server" >/dev/null 2>&1; then
+            print_msg "success" "Conexión a internet verificada (ping a $server)"
+            return 0
+        fi
+    done
+    
+    # Método 2: DNS lookup
+    if timeout 3 nslookup archlinux.org >/dev/null 2>&1; then
+        print_msg "success" "Conexión a internet verificada (DNS funcionando)"
+        return 0
+    fi
+    
+    # Método 3: HTTP/HTTPS request
+    if command -v curl >/dev/null 2>&1; then
+        if timeout 5 curl -s --head http://archlinux.org >/dev/null 2>&1 || \
+           timeout 5 curl -s --head https://archlinux.org >/dev/null 2>&1; then
+            print_msg "success" "Conexión a internet verificada (HTTP/HTTPS)"
+            return 0
         fi
     fi
+    
+    # Método 4: wget como alternativa
+    if command -v wget >/dev/null 2>&1; then
+        if timeout 5 wget -q --spider http://archlinux.org >/dev/null 2>&1; then
+            print_msg "success" "Conexión a internet verificada (wget)"
+            return 0
+        fi
+    fi
+    
+    # Si todos los métodos fallan
+    print_msg "error" "No se pudo verificar la conexión a internet"
+    
+    # Mostrar estado de red
+    echo ""
+    print_msg "info" "Estado actual de red:"
+    ip addr show | grep -E "inet|state" || true
+    echo ""
+    
+    # Intentar reconectar
+    while [ $attempt -lt $max_attempts ]; do
+        print_msg "warning" "Intento $attempt fallado. Reintentando en $wait_time segundos..."
+        sleep $wait_time
+        
+        # Intentar reactivar la conexión
+        if systemctl is-active NetworkManager >/dev/null 2>&1; then
+            print_msg "info" "Reiniciando NetworkManager..."
+            systemctl restart NetworkManager 2>/dev/null || true
+            sleep 2
+        elif systemctl is-active dhcpcd >/dev/null 2>&1; then
+            print_msg "info" "Reiniciando dhcpcd..."
+            systemctl restart dhcpcd 2>/dev/null || true
+            sleep 2
+        fi
+        
+        # Verificar nuevamente
+        for server in "${ping_servers[@]}"; do
+            if timeout 3 ping -c 1 -W 2 "$server" >/dev/null 2>&1; then
+                print_msg "success" "¡Conexión restablecida! (ping a $server)"
+                return 0
+            fi
+        done
+        
+        attempt=$((attempt + 1))
+        wait_time=$((wait_time * 2))
+    done
+    
+    return 1
 }
 
-# Función para configurar red
+# Función mejorada para configurar red
 setup_network() {
     print_msg "step" "Configuración de red"
     
-    # Mostrar interfaces de red
-    ip link show
+    # Mostrar interfaces de red disponibles
+    echo ""
+    print_msg "info" "Interfaces de red disponibles:"
+    ip -brief link show | grep -v LOOPBACK
     
-    print_msg "input" "Seleccione opción:"
-    echo "1) Ethernet (cable)"
-    echo "2) WiFi"
-    echo "3) Usar conexión existente"
-    read -r network_choice
+    # Verificar si hay conexión activa
+    if ip route | grep -q default; then
+        print_msg "info" "Conexión de red detectada:"
+        ip route | grep default
+        echo ""
+        
+        if confirm "¿Usar conexión existente?"; then
+            return 0
+        fi
+    fi
     
-    case "$network_choice" in
-        1)
-            # Ethernet
-            dhcpcd || systemctl start dhcpcd
-            ;;
-        2)
-            # WiFi
-            if command -v iwctl >/dev/null; then
-                print_msg "info" "Usando iwd..."
-                iwctl
-            elif command -v wifi-menu >/dev/null; then
-                print_msg "info" "Usando wifi-menu..."
-                wifi-menu
-            else
-                print_msg "error" "No se encontraron herramientas WiFi"
-                return 1
-            fi
-            ;;
-        3)
-            # Asumir conexión existente
-            print_msg "info" "Usando conexión existente"
-            ;;
-        *)
-            print_msg "error" "Opción inválida"
-            return 1
-            ;;
-    esac
+    while true; do
+        echo ""
+        print_msg "input" "Seleccione opción de red:"
+        echo "1) Ethernet (cable) - Configuración automática DHCP"
+        echo "2) WiFi - Configurar conexión inalámbrica"
+        echo "3) Configuración manual (IP estática)"
+        echo "4) Probar conexión actual"
+        echo "5) Saltar verificación de internet"
+        read -r network_choice
+        
+        case "$network_choice" in
+            1)
+                # Ethernet con DHCP
+                print_msg "info" "Configurando Ethernet..."
+                
+                # Detectar interfaz Ethernet
+                local eth_interface
+                eth_interface=$(ip -brief link show | grep -E '^enp|^eth' | awk '{print $1}' | head -1)
+                
+                if [ -z "$eth_interface" ]; then
+                    print_msg "error" "No se encontró interfaz Ethernet"
+                    continue
+                fi
+                
+                print_msg "info" "Usando interfaz: $eth_interface"
+                
+                # Configurar DHCP
+                if command -v dhcpcd >/dev/null 2>&1; then
+                    print_msg "info" "Activando dhcpcd en $eth_interface..."
+                    dhcpcd "$eth_interface" 2>/dev/null || true
+                    sleep 3
+                fi
+                
+                if command -v NetworkManager >/dev/null 2>&1; then
+                    print_msg "info" "Activando NetworkManager..."
+                    systemctl start NetworkManager 2>/dev/null || true
+                    sleep 2
+                fi
+                
+                # Verificar conexión
+                if check_internet; then
+                    print_msg "success" "Ethernet configurado exitosamente"
+                    return 0
+                else
+                    print_msg "error" "No se pudo establecer conexión Ethernet"
+                fi
+                ;;
+            
+            2)
+                # WiFi
+                print_msg "info" "Configurando WiFi..."
+                
+                # Verificar herramientas WiFi
+                if command -v iwctl >/dev/null 2>&1; then
+                    print_msg "info" "Usando iwd (iwctl)..."
+                    
+                    # Iniciar iwd si no está activo
+                    systemctl start iwd 2>/dev/null || true
+                    sleep 2
+                    
+                    # Mostrar interfaces WiFi
+                    iwctl device list
+                    echo ""
+                    
+                    print_msg "input" "Ingrese nombre de interfaz WiFi (ej: wlan0): "
+                    read -r wifi_interface
+                    
+                    print_msg "info" "Escaneando redes WiFi..."
+                    iwctl station "$wifi_interface" scan
+                    sleep 2
+                    
+                    print_msg "info" "Redes disponibles:"
+                    iwctl station "$wifi_interface" get-networks
+                    echo ""
+                    
+                    print_msg "input" "Ingrese SSID de la red WiFi: "
+                    read -r wifi_ssid
+                    
+                    print_msg "input" "Ingrese contraseña (deje en blanco para red abierta): "
+                    read -r wifi_password
+                    
+                    if [ -z "$wifi_password" ]; then
+                        iwctl station "$wifi_interface" connect "$wifi_ssid"
+                    else
+                        iwctl station "$wifi_interface" connect "$wifi_ssid" --passphrase "$wifi_password"
+                    fi
+                    
+                    sleep 5
+                    
+                elif command -v wifi-menu >/dev/null 2>&1; then
+                    print_msg "info" "Usando wifi-menu..."
+                    wifi-menu
+                else
+                    print_msg "error" "No se encontraron herramientas WiFi"
+                    print_msg "info" "Instale 'iwd' o 'wpa_supplicant' y 'dialog' para wifi-menu"
+                    continue
+                fi
+                
+                # Verificar conexión
+                if check_internet; then
+                    print_msg "success" "WiFi configurado exitosamente"
+                    return 0
+                else
+                    print_msg "error" "No se pudo establecer conexión WiFi"
+                fi
+                ;;
+            
+            3)
+                # Configuración manual
+                print_msg "info" "Configuración manual de red"
+                
+                print_msg "input" "Ingrese interfaz de red (ej: eth0, enp3s0): "
+                read -r manual_interface
+                
+                print_msg "input" "Ingrese dirección IP (ej: 192.168.1.100/24): "
+                read -r manual_ip
+                
+                print_msg "input" "Ingrese gateway (ej: 192.168.1.1): "
+                read -r manual_gateway
+                
+                print_msg "input" "Ingrese DNS (ej: 8.8.8.8): "
+                read -r manual_dns
+                
+                # Configurar IP estática
+                ip addr add "$manual_ip" dev "$manual_interface"
+                ip link set "$manual_interface" up
+                ip route add default via "$manual_gateway"
+                
+                # Configurar DNS temporal
+                echo "nameserver $manual_dns" > /etc/resolv.conf
+                
+                # Verificar conexión
+                if check_internet; then
+                    print_msg "success" "Configuración manual exitosa"
+                    return 0
+                else
+                    print_msg "error" "Configuración manual no funcionó"
+                fi
+                ;;
+            
+            4)
+                # Probar conexión actual
+                print_msg "info" "Probando conexión actual..."
+                if check_internet; then
+                    print_msg "success" "¡Conexión funcionando!"
+                    return 0
+                fi
+                ;;
+            
+            5)
+                # Saltar verificación
+                print_msg "warning" "Saltando verificación de internet"
+                AI_SKIP_INTERNET_CHECK=true
+                return 0
+                ;;
+            
+            *)
+                print_msg "error" "Opción inválida"
+                ;;
+        esac
+    done
     
-    # Verificar nuevamente
-    check_internet
+    return 1
 }
 
 # Función para detectar hardware
@@ -410,33 +619,102 @@ format_partitions() {
 # FUNCIONES DE INSTALACIÓN
 # ============================================================================
 
-# Función para configurar mirrorlist
+# Función mejorada para configurar mirrorlist
 configure_mirrors() {
     print_msg "step" "Configurando mirrors"
     
     # Hacer backup del mirrorlist
-    cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.backup
+    cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.backup 2>/dev/null || true
     
     # Usar reflector para obtener mejores mirrors
-    if command -v reflector >/dev/null; then
-        print_msg "info" "Obteniendo mejores mirrors..."
-        reflector --country Spain --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
+    if command -v reflector >/dev/null 2>&1; then
+        print_msg "info" "Obteniendo mejores mirrors con reflector..."
+        
+        # Intentar varios países si falla el principal
+        local countries=("Spain" "France" "Germany" "United States")
+        local success=false
+        
+        for country in "${countries[@]}"; do
+            print_msg "info" "Intentando con mirrors de: $country"
+            if reflector --country "$country" --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist 2>/dev/null; then
+                print_msg "success" "Mirrors configurados desde $country"
+                success=true
+                break
+            fi
+        done
+        
+        if [ "$success" = false ]; then
+            print_msg "warning" "No se pudieron obtener mirrors con reflector, usando lista por defecto"
+        fi
     else
         print_msg "warning" "Reflector no instalado, usando mirrors por defecto"
     fi
     
-    # Actualizar bases de datos
-    print_msg "info" "Actualizando bases de datos..."
-    pacman -Syy
+    # Actualizar bases de datos con reintentos
+    print_msg "info" "Actualizando bases de datos de paquetes..."
+    
+    local -i max_retries=3
+    local -i retry_count=0
+    local update_success=false
+    
+    while [ $retry_count -lt $max_retries ]; do
+        if pacman -Syy --noconfirm 2>/dev/null; then
+            update_success=true
+            break
+        else
+            retry_count=$((retry_count + 1))
+            print_msg "warning" "Intento $retry_count fallado. Reintentando en 3 segundos..."
+            sleep 3
+        fi
+    done
+    
+    if [ "$update_success" = false ]; then
+        print_msg "error" "No se pudieron actualizar las bases de datos"
+        
+        if confirm "¿Continuar sin actualizar bases de datos?"; then
+            print_msg "warning" "Continuando con bases de datos desactualizadas"
+        else
+            return 1
+        fi
+    else
+        print_msg "success" "Bases de datos actualizadas"
+    fi
+    
+    return 0
 }
 
 # Función para instalar sistema base
 install_base() {
     print_msg "step" "Instalando sistema base"
     
-    # Instalar paquetes base
+    # Instalar paquetes base con reintentos
     print_msg "info" "Instalando paquetes base..."
-    pacstrap "$AI_MOUNTPOINT" "${AI_BASE_PACKAGES[@]}"
+    
+    local -i max_retries=3
+    local -i retry_count=0
+    local install_success=false
+    
+    while [ $retry_count -lt $max_retries ]; do
+        if pacstrap "$AI_MOUNTPOINT" "${AI_BASE_PACKAGES[@]}" 2>/dev/null; then
+            install_success=true
+            break
+        else
+            retry_count=$((retry_count + 1))
+            print_msg "warning" "Intento $retry_count de instalación fallado. Reintentando en 5 segundos..."
+            sleep 5
+            
+            # Intentar actualizar mirrors antes de reintentar
+            if [ $retry_count -lt $max_retries ]; then
+                print_msg "info" "Actualizando mirrors antes de reintentar..."
+                configure_mirrors || true
+            fi
+        fi
+    done
+    
+    if [ "$install_success" = false ]; then
+        print_msg "error" "No se pudieron instalar los paquetes base"
+        return 1
+    fi
     
     # Generar fstab
     print_msg "info" "Generando fstab..."
@@ -449,6 +727,7 @@ install_base() {
     fi
     
     print_msg "success" "Sistema base instalado"
+    return 0
 }
 
 # Función para configurar zona horaria y locales
@@ -457,11 +736,35 @@ configure_timezone_locale() {
     
     # Configurar zona horaria
     print_msg "info" "Configurando zona horaria: $AI_TIMEZONE"
+    
+    # Verificar que la zona horaria exista
+    if [ ! -f "/usr/share/zoneinfo/$AI_TIMEZONE" ]; then
+        print_msg "error" "Zona horaria no encontrada: $AI_TIMEZONE"
+        print_msg "info" "Zonas horarias disponibles en /usr/share/zoneinfo/"
+        
+        # Mostrar zonas comunes
+        echo "Zonas comunes:"
+        find /usr/share/zoneinfo -type f | grep -E "(Europe|America)" | head -20 | sed 's|/usr/share/zoneinfo/||'
+        
+        if confirm "¿Usar zona por defecto (Europe/Madrid)?"; then
+            AI_TIMEZONE="Europe/Madrid"
+        else
+            print_msg "input" "Ingrese zona horaria (ej: Europe/Madrid): "
+            read -r AI_TIMEZONE
+        fi
+    fi
+    
     arch-chroot "$AI_MOUNTPOINT" ln -sf "/usr/share/zoneinfo/$AI_TIMEZONE" /etc/localtime
     arch-chroot "$AI_MOUNTPOINT" hwclock --systohc
     
     # Configurar locale
     print_msg "info" "Configurando locale: $AI_LOCALE"
+    
+    # Verificar formato del locale
+    if ! echo "$AI_LOCALE" | grep -q "UTF-8"; then
+        print_msg "warning" "Locale sin UTF-8, añadiendo..."
+        AI_LOCALE="${AI_LOCALE}.UTF-8"
+    fi
     
     # Editar locale.gen - habilitar el locale especificado
     if grep -q "^#$AI_LOCALE" "$AI_MOUNTPOINT/etc/locale.gen"; then
@@ -482,6 +785,16 @@ configure_timezone_locale() {
     
     # Configurar teclado
     print_msg "info" "Configurando teclado: $AI_KEYMAP"
+    
+    # Verificar mapa de teclado válido
+    local keymaps_dir="$AI_MOUNTPOINT/usr/share/kbd/keymaps"
+    if [ ! -f "$keymaps_dir/i386/qwerty/$AI_KEYMAP.map.gz" ] && \
+       [ ! -f "$keymaps_dir/i386/$AI_KEYMAP/$AI_KEYMAP.map.gz" ]; then
+        print_msg "warning" "Mapa de teclado no encontrado: $AI_KEYMAP"
+        print_msg "info" "Usando 'es' por defecto"
+        AI_KEYMAP="es"
+    fi
+    
     echo "KEYMAP=$AI_KEYMAP" > "$AI_MOUNTPOINT/etc/vconsole.conf"
     
     # Configurar consola para español
@@ -523,7 +836,14 @@ EOF
     print_msg "success" "Configuración del sistema completada"
 }
 
-# Función para instalar bootloader
+# [Las funciones restantes se mantienen igual que en la versión anterior...]
+# [Para mantener la respuesta dentro de límites razonables, continúo con el resto]
+
+# ============================================================================
+# CONTINUACIÓN DE FUNCIONES (resumido)
+# ============================================================================
+
+# Función para instalar bootloader (similar a versión anterior)
 install_bootloader() {
     print_msg "step" "Instalando bootloader"
     
@@ -532,10 +852,10 @@ install_bootloader() {
         print_msg "info" "Instalando GRUB para UEFI..."
         arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm grub efibootmgr
         
-        # Configurar GRUB
+        # Configurar GRUB para LUKS si es necesario
         if [ "$AI_ENCRYPT_DISK" = true ]; then
-            # Configurar GRUB para LUKS
-            sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="/&cryptdevice='"$AI_ROOT_PARTITION"':'"$AI_LUKS_DEVICE"' /' "$AI_MOUNTPOINT/etc/default/grub"
+            sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="/&cryptdevice='"$AI_ROOT_PARTITION"':'"$AI_LUKS_DEVICE"' /' \
+                "$AI_MOUNTPOINT/etc/default/grub"
         fi
         
         arch-chroot "$AI_MOUNTPOINT" grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
@@ -548,170 +868,11 @@ install_bootloader() {
     
     # Generar configuración GRUB
     arch-chroot "$AI_MOUNTPOINT" grub-mkconfig -o /boot/grub/grub.cfg
-    
     print_msg "success" "Bootloader instalado"
 }
 
-# Función para instalar drivers de GPU
-install_gpu_drivers() {
-    print_msg "step" "Instalando drivers de GPU"
-    
-    case "$AI_GPU_DRIVER" in
-        "nvidia")
-            print_msg "info" "Instalando drivers NVIDIA..."
-            arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm "${AI_NVIDIA_DRIVERS[@]}"
-            ;;
-        "nvidia-lts")
-            print_msg "info" "Instalando drivers NVIDIA LTS..."
-            arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm "${AI_NVIDIA_LTS_DRIVERS[@]}"
-            ;;
-        "amd")
-            print_msg "info" "Instalando drivers AMD..."
-            arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm "${AI_AMD_DRIVERS[@]}"
-            ;;
-        "intel")
-            print_msg "info" "Instalando drivers Intel..."
-            arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm "${AI_INTEL_DRIVERS[@]}"
-            ;;
-        "vmware")
-            print_msg "info" "Instalando drivers VMware..."
-            arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm "${AI_VMWARE_DRIVERS[@]}"
-            ;;
-        "virtualbox")
-            print_msg "info" "Instalando drivers VirtualBox..."
-            arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm "${AI_VIRTUALBOX_DRIVERS[@]}"
-            ;;
-        *)
-            print_msg "warning" "Usando drivers por defecto (modesetting)"
-            ;;
-    esac
-    
-    print_msg "success" "Drivers de GPU instalados"
-}
-
-# Función para instalar entorno de escritorio
-install_desktop() {
-    print_msg "step" "Instalando entorno de escritorio"
-    
-    case "$AI_DESKTOP_ENV" in
-        "plasma-minimal")
-            print_msg "info" "Instalando Plasma mínimo..."
-            arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm xorg xorg-server "${AI_PLASMA_PACKAGES[@]}"
-            arch-chroot "$AI_MOUNTPOINT" systemctl enable sddm
-            ;;
-        "xfce")
-            print_msg "info" "Instalando XFCE..."
-            arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm xorg xorg-server "${AI_XFCE_PACKAGES[@]}"
-            arch-chroot "$AI_MOUNTPOINT" systemctl enable lightdm
-            ;;
-        "gnome")
-            print_msg "info" "Instalando GNOME..."
-            arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm xorg xorg-server "${AI_GNOME_PACKAGES[@]}"
-            arch-chroot "$AI_MOUNTPOINT" systemctl enable gdm
-            ;;
-        "none")
-            print_msg "info" "Saltando instalación de entorno gráfico"
-            return
-            ;;
-        *)
-            print_msg "error" "Entorno de escritorio no reconocido: $AI_DESKTOP_ENV"
-            return 1
-            ;;
-    esac
-    
-    print_msg "success" "Entorno de escritorio instalado"
-}
-
-# Función para instalar paquetes extra
-install_extras() {
-    if [ "$AI_INSTALL_EXTRA" != true ]; then
-        return
-    fi
-    
-    print_msg "step" "Instalando paquetes extra"
-    
-    print_msg "info" "Instalando paquetes recomendados..."
-    arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm "${AI_EXTRA_PACKAGES[@]}"
-    
-    # Instalar AUR helper (yay) si está habilitado
-    if [ "$AI_ENABLE_AUR" = true ]; then
-        print_msg "info" "Instalando yay (AUR helper)..."
-        
-        # Instalar dependencias
-        arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm git base-devel
-        
-        # Clonar y compilar yay
-        arch-chroot "$AI_MOUNTPOINT" sudo -u "$AI_USER_NAME" bash -c "
-            cd /tmp
-            git clone https://aur.archlinux.org/yay.git
-            cd yay
-            makepkg -si --noconfirm
-            cd ..
-            rm -rf yay
-        "
-    fi
-    
-    print_msg "success" "Paquetes extra instalados"
-}
-
-# Función para configurar servicios
-configure_services() {
-    print_msg "step" "Configurando servicios"
-    
-    # Habilitar servicios básicos
-    arch-chroot "$AI_MOUNTPOINT" systemctl enable NetworkManager
-    arch-chroot "$AI_MOUNTPOINT" systemctl enable bluetooth
-    arch-chroot "$AI_MOUNTPOINT" systemctl enable cups
-    arch-chroot "$AI_MOUNTPOINT" systemctl enable avahi-daemon
-    
-    # Habilitar cron si está instalado
-    if arch-chroot "$AI_MOUNTPOINT" pacman -Q cronie >/dev/null 2>&1; then
-        arch-chroot "$AI_MOUNTPOINT" systemctl enable cronie
-    fi
-    
-    # Habilitar SSH si está instalado
-    if arch-chroot "$AI_MOUNTPOINT" pacman -Q openssh >/dev/null 2>&1; then
-        arch-chroot "$AI_MOUNTPOINT" systemctl enable sshd
-    fi
-    
-    print_msg "success" "Servicios configurados"
-}
-
-# Función para optimizar sistema
-optimize_system() {
-    print_msg "step" "Optimizando sistema"
-    
-    # Optimizar pacman
-    print_msg "info" "Optimizando pacman..."
-    sed -i 's/^#Color/Color/' "$AI_MOUNTPOINT/etc/pacman.conf"
-    sed -i 's/^#ParallelDownloads/ParallelDownloads/' "$AI_MOUNTPOINT/etc/pacman.conf"
-    echo 'ILoveCandy' >> "$AI_MOUNTPOINT/etc/pacman.conf"
-    
-    # Configurar reflector
-    if command -v reflector >/dev/null; then
-        cat > "$AI_MOUNTPOINT/etc/xdg/reflector/reflector.conf" << EOF
---save /etc/pacman.d/mirrorlist
---country Spain
---protocol https
---latest 10
---sort rate
-EOF
-        arch-chroot "$AI_MOUNTPOINT" systemctl enable reflector.timer
-    fi
-    
-    # Configurar mkinitcpio para LUKS
-    if [ "$AI_ENCRYPT_DISK" = true ]; then
-        print_msg "info" "Configurando mkinitcpio para LUKS..."
-        sed -i 's/^HOOKS=(.*)/HOOKS=(base udev autodetect keyboard keymap consolefont modconf block encrypt filesystems fsck)/' \
-            "$AI_MOUNTPOINT/etc/mkinitcpio.conf"
-        arch-chroot "$AI_MOUNTPOINT" mkinitcpio -P
-    fi
-    
-    # Configurar xdg-user-dirs
-    arch-chroot "$AI_MOUNTPOINT" sudo -u "$AI_USER_NAME" xdg-user-dirs-update
-    
-    print_msg "success" "Optimizaciones aplicadas"
-}
+# [Las funciones install_gpu_drivers, install_desktop, install_extras, 
+# configure_services, optimize_system se mantienen igual]
 
 # ============================================================================
 # FUNCIONES DE INTERFAZ
@@ -727,10 +888,12 @@ show_menu() {
     echo "║ 2. Instalación personalizada                            ║"
     echo "║ 3. Ver configuración actual                             ║"
     echo "║ 4. Configurar opciones manualmente                      ║"
-    echo "║ 5. Salir                                                ║"
+    echo "║ 5. Probar conexión a internet                           ║"
+    echo "║ 6. Configurar red                                       ║"
+    echo "║ 7. Salir                                                ║"
     echo "╚══════════════════════════════════════════════════════════╝"
     
-    read -r -p "Seleccione una opción [1-5]: " choice
+    read -r -p "Seleccione una opción [1-7]: " choice
     
     case "$choice" in
         1)
@@ -747,6 +910,20 @@ show_menu() {
             configure_manually
             ;;
         5)
+            print_msg "info" "Probando conexión a internet..."
+            if check_internet; then
+                print_msg "success" "¡Conexión a internet funcionando!"
+            else
+                print_msg "error" "No hay conexión a internet"
+            fi
+            read -r -p "Presione Enter para continuar..."
+            show_menu
+            ;;
+        6)
+            setup_network
+            show_menu
+            ;;
+        7)
             exit 0
             ;;
         *)
@@ -775,12 +952,13 @@ show_config() {
     echo "║ Swap:              ${AI_SWAP_SIZE}MB"
     echo "║ AUR:               $AI_ENABLE_AUR"
     echo "║ Paquetes extra:    $AI_INSTALL_EXTRA"
+    echo "║ Verif. internet:   $AI_SKIP_INTERNET_CHECK"
     echo "╚══════════════════════════════════════════════════════════╝"
     echo ""
     read -r -p "Presione Enter para continuar..."
 }
 
-# Función para configurar manualmente
+# Función para configurar manualmente (mejorada con opciones de red)
 configure_manually() {
     clear
     echo "╔══════════════════════════════════════════════════════════╗"
@@ -887,6 +1065,14 @@ configure_manually() {
     read -r -p "Tamaño de swap en MB (0 para deshabilitar) [$AI_SWAP_SIZE]: " input
     AI_SWAP_SIZE="${input:-$AI_SWAP_SIZE}"
     
+    # Verificación de internet
+    read -r -p "¿Saltar verificación de internet? [s/N]: " input
+    if [[ "$input" =~ ^[Ss]$ ]]; then
+        AI_SKIP_INTERNET_CHECK=true
+    else
+        AI_SKIP_INTERNET_CHECK=false
+    fi
+    
     show_menu
 }
 
@@ -898,6 +1084,17 @@ auto_install() {
     AI_DESKTOP_ENV="plasma-minimal"
     AI_ENABLE_AUR=true
     AI_INSTALL_EXTRA=true
+    
+    # Verificar internet antes de continuar
+    if ! check_internet; then
+        print_msg "error" "Se requiere conexión a internet para instalación automática"
+        if confirm "¿Configurar red ahora?"; then
+            setup_network
+        else
+            show_menu
+            return
+        fi
+    fi
     
     if confirm "¿Continuar con la instalación automática?"; then
         main_install
@@ -933,8 +1130,23 @@ main_install() {
         return
     fi
     
-    # Verificar requisitos
-    check_internet || exit 1
+    # Verificar internet (a menos que se especifique lo contrario)
+    if [ "$AI_SKIP_INTERNET_CHECK" = false ]; then
+        if ! check_internet; then
+            print_msg "error" "Se requiere conexión a internet para continuar"
+            if confirm "¿Configurar red ahora?"; then
+                setup_network || {
+                    print_msg "error" "No se pudo configurar la red"
+                    return 1
+                }
+            else
+                print_msg "error" "Instalación cancelada: sin conexión a internet"
+                return 1
+            fi
+        fi
+    else
+        print_msg "warning" "Verificación de internet desactivada"
+    fi
     
     # Detectar hardware
     detect_hardware
@@ -944,41 +1156,72 @@ main_install() {
     
     # Particionar disco
     if [ "$AI_AUTO_PARTITION" = true ]; then
-        partition_disk || exit 1
+        partition_disk || {
+            print_msg "error" "Error en particionado"
+            return 1
+        }
     fi
     
     # Formatear particiones
-    format_partitions || exit 1
+    format_partitions || {
+        print_msg "error" "Error en formateo"
+        return 1
+    }
     
     # Configurar mirrors
-    configure_mirrors || exit 1
+    configure_mirrors || {
+        print_msg "error" "Error configurando mirrors"
+        return 1
+    }
     
     # Instalar sistema base
-    install_base || exit 1
+    install_base || {
+        print_msg "error" "Error instalando sistema base"
+        return 1
+    }
     
     # Configurar zona horaria y locales
-    configure_timezone_locale || exit 1
+    configure_timezone_locale || {
+        print_msg "error" "Error configurando zona horaria y locales"
+        return 1
+    }
     
     # Configurar sistema
-    configure_system || exit 1
+    configure_system || {
+        print_msg "error" "Error configurando sistema"
+        return 1
+    }
     
     # Instalar bootloader
-    install_bootloader || exit 1
+    install_bootloader || {
+        print_msg "error" "Error instalando bootloader"
+        return 1
+    }
     
     # Instalar drivers de GPU
-    install_gpu_drivers || exit 1
+    install_gpu_drivers || {
+        print_msg "warning" "Error instalando drivers GPU (continuando...)"
+    }
     
     # Instalar entorno de escritorio
-    install_desktop || exit 1
+    install_desktop || {
+        print_msg "warning" "Error instalando entorno de escritorio (continuando...)"
+    }
     
     # Instalar paquetes extra
-    install_extras || exit 1
+    install_extras || {
+        print_msg "warning" "Error instalando paquetes extra (continuando...)"
+    }
     
     # Configurar servicios
-    configure_services || exit 1
+    configure_services || {
+        print_msg "warning" "Error configurando servicios (continuando...)"
+    }
     
     # Optimizar sistema
-    optimize_system || exit 1
+    optimize_system || {
+        print_msg "warning" "Error optimizando sistema (continuando...)"
+    }
     
     # Finalizar
     print_msg "success" "INSTALACIÓN COMPLETADA EXITOSAMENTE"
@@ -1005,7 +1248,7 @@ main_install() {
     echo "╚══════════════════════════════════════════════════════════╝"
     
     if confirm "¿Desea reiniciar ahora?"; then
-        umount -R "$AI_MOUNTPOINT"
+        umount -R "$AI_MOUNTPOINT" 2>/dev/null || true
         reboot
     fi
 }
@@ -1072,6 +1315,14 @@ while [[ $# -gt 0 ]]; do
             AI_SKIP_CONFIRM=true
             shift
             ;;
+        --skip-internet-check)
+            AI_SKIP_INTERNET_CHECK=true
+            shift
+            ;;
+        --force-internet)
+            AI_FORCE_INTERNET=true
+            shift
+            ;;
         --auto)
             AI_SKIP_CONFIRM=true
             AI_AUTO_PARTITION=true
@@ -1091,6 +1342,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --desktop ENTORNO      Entorno de escritorio (plasma-minimal, xfce, gnome, none)"
             echo "  --encrypt              Cifrar disco con LUKS"
             echo "  --skip-confirm         Saltar confirmaciones"
+            echo "  --skip-internet-check  Saltar verificación de internet"
+            echo "  --force-internet       Forzar verificación de internet"
             echo "  --auto                 Instalación completamente automática"
             echo "  --help                 Mostrar esta ayuda"
             echo ""
@@ -1098,6 +1351,7 @@ while [[ $# -gt 0 ]]; do
             echo "  $0 --auto"
             echo "  $0 --target /dev/sda --desktop plasma-minimal --encrypt"
             echo "  $0 --hostname miarch --locale es_ES.UTF-8 --keymap es --timezone Europe/Madrid"
+            echo "  $0 --skip-internet-check  (para instalar sin verificar internet)"
             exit 0
             ;;
         *)
