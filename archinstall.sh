@@ -2,1094 +2,1038 @@
 # -*- coding: utf-8 -*-
 # region header
 # [Project page](https://torben.website/archinstall)
-
 # Copyright Torben Sickert (info["~at~"]torben.website) 16.12.2012
-
-# License
-# -------
-
-# This library written by Torben Sickert stand under a creative commons naming
-# 3.0 unported license. See https://creativecommons.org/licenses/by/3.0/deed.de
+# License: Creative Commons 3.0
 # endregion
+
 # shellcheck disable=SC1004,SC2016,SC2034,SC2155
 shopt -s expand_aliases
-# region import
-alias ai.download=ai_download
-ai_download() {
-    local -r __documentation__='
-        Simply downloads missing modules.
 
-        >>> ai.download --silent https://domain.tld/path/to/file.ext; echo $?
-        6
-    '
-    command curl --insecure "$@"
-    return $?
-}
+# ============================================================================
+# CONFIGURACIÓN PRINCIPAL
+# ============================================================================
 
-if [ -f "$(dirname "${BASH_SOURCE[0]}")/node_modules/bashlink/module.sh" ]; then
-    # shellcheck disable=SC1090
-    source "$(dirname "${BASH_SOURCE[0]}")/node_modules/bashlink/module.sh"
-elif [ -f "/usr/lib/bashlink/module.sh" ]; then
-    # shellcheck disable=SC1091
-    source "/usr/lib/bashlink/module.sh"
-else
-    declare -g AI_CACHE_PATH="$(
-        echo "$@" | \
-            sed \
-                --regexp-extended \
-                's/(^| )(-o|--cache-path)(=| +)(.+[^ ])($| +-)/\4/'
-    )"
-    [ "$AI_CACHE_PATH" = "$*" ] && \
-        AI_CACHE_PATH=archInstallCache
-    AI_CACHE_PATH="${AI_CACHE_PATH%/}/"
-    declare -gr BL_MODULE_REMOTE_MODULE_CACHE_PATH="${AI_CACHE_PATH}bashlink"
-    mkdir --parents "$BL_MODULE_REMOTE_MODULE_CACHE_PATH"
-    declare -gr BL_MODULE_RETRIEVE_REMOTE_MODULES=true
-    if ! (
-        [ -f "${BL_MODULE_REMOTE_MODULE_CACHE_PATH}/module.sh" ] || \
-        ai.download \
-            https://raw.githubusercontent.com/thaibault/bashlink/main/module.sh \
-                >"${BL_MODULE_REMOTE_MODULE_CACHE_PATH}/module.sh"
-    ); then
-        echo Needed bashlink library could not be retrieved. 1>&2
-        rm \
-            --force \
-            --recursive \
-            "${BL_MODULE_REMOTE_MODULE_CACHE_PATH}/module.sh"
-        exit 1
-    fi
-    # shellcheck disable=SC1091
-    source "${BL_MODULE_REMOTE_MODULE_CACHE_PATH}/module.sh"
-fi
-bl.module.import bashlink.changeroot
-bl.module.import bashlink.dictionary
-bl.module.import bashlink.exception
-bl.module.import bashlink.logging
-bl.module.import bashlink.number
-bl.module.import bashlink.tools
-bl.module.import bashlink.array
-bl.module.import bashlink.string
-# endregion
-# region variables
-declare -gr AI__DOCUMENTATION__='
-    Este script instala Arch Linux con opciones mejoradas.
-    
-    Características nuevas:
-    - Instalación de Plasma mínimo (KDE)
-    - Soporte para XFCE y otros entornos
-    - Gestión mejorada de usuarios y grupos
-    - Configuración regional completa
-    - Instalación de drivers automática
-    - Soporte para AUR (yay)
-    - Optimizaciones de sistema
-    - Menú interactivo
+# Configuración por defecto
+declare -g AI_HOST_NAME="archlinux"
+declare -g AI_USER_NAME="archuser"
+declare -g AI_USER_PASSWORD="archlinux"
+declare -g AI_ROOT_PASSWORD="archlinux"
+declare -g AI_TARGET="/dev/sda"
+declare -g AI_TIMEZONE="Europe/Madrid"
+declare -g AI_LOCALE="es_ES.UTF-8"
+declare -g AI_KEYMAP="es"
+declare -g AI_DESKTOP_ENV="plasma-minimal"  # plasma-minimal, xfce, gnome, none
+declare -g AI_GPU_DRIVER="auto"  # auto, intel, amd, nvidia, nvidia-lts, vmware, virtualbox
+declare -g AI_ENCRYPT_DISK=false
+declare -g AI_LUKS_PASSWORD="archlinux"
+declare -g AI_SWAP_SIZE="4096"  # MB, 0 para deshabilitar
+declare -g AI_AUTO_PARTITION=true
+declare -g AI_ENABLE_AUR=true
+declare -g AI_INSTALL_EXTRA=true
+declare -g AI_SKIP_CONFIRM=false
 
-    Uso básico:
-    curl -L https://raw.githubusercontent.com/.../archinstall.sh | bash -s -- --target /dev/sda --desktop plasma-minimal
-'
-declare -agr AI__DEPENDENCIES__=(
-    bash
-    cat
-    chroot
-    curl
-    grep
-    ln
-    lsblk
-    lspci
-    mktemp
-    mount
-    mountpoint
-    rm
-    sed
-    sort
-    sync
-    touch
-    tar
-    uname
-    which
-    xz
-)
-declare -agr AI__OPTIONAL_DEPENDENCIES__=(
-    'blockdev: Call block device ioctls from the command line (part of util-linux).'
-    'btrfs: Control a btrfs filesystem (part of btrfs-progs).'
-    'cryptsetup: Userspace setup tool for transparent encryption of block devices using dm-crypt.'
-    'gdisk: Interactive GUID partition table (GPT) manipulator (part of gptfdisk).'
-    'arch-chroot: Performs an arch chroot with api file system binding (part of package "arch-install-scripts").'
-    'dosfslabel: Handle dos file systems (part of dosfstools).'
-    'fakeroot: Run a command in an environment faking root privileges for file manipulation.'
-    'fakechroot: Wraps some c-lib functions to enable programs like "chroot" running without root privileges.'
-    'ip: Determines network adapter (part of iproute2).'
-    'os-prober: Detects presence of other operating systems.'
-    'pacstrap: Installs arch linux from an existing linux system (part of package "arch-install-scripts").'
-)
+# Variables internas
+declare -g AI_MOUNTPOINT="/mnt"
+declare -g AI_BOOT_PARTITION="${AI_TARGET}1"
+declare -g AI_ROOT_PARTITION="${AI_TARGET}2"
+declare -g AI_SWAP_PARTITION="${AI_TARGET}3"
+declare -g AI_LUKS_DEVICE="cryptroot"
 
-# Paquetes básicos del sistema
-declare -agr AI_BASIC_PACKAGES=(base base-devel linux linux-firmware linux-headers which nano sudo git)
-
-# Paquetes comunes adicionales
-declare -agr AI_COMMON_ADDITIONAL_PACKAGES=(
-    networkmanager network-manager-applet
-    pulseaudio pulseaudio-alsa pavucontrol
-    bluez bluez-utils
-    cups cups-pdf
-    avahi nss-mdns
-    xdg-user-dirs xdg-utils
-    ntfs-3g exfat-utils
-    unzip unrar p7zip
-    wget curl
-    htop neofetch
+# Paquetes base
+declare -ag AI_BASE_PACKAGES=(
+    base base-devel linux linux-firmware linux-headers
+    sudo nano git wget curl htop neofetch
+    networkmanager dhclient dhcpcd
+    grub efibootmgr dosfstools os-prober mtools
     bash-completion
-    man-db man-pages
-    mlocate
-    cronie
+    man-db man-pages texinfo
+    ntfs-3g exfat-utils fuse2 fuse3
 )
 
 # Paquetes para Plasma mínimo
-declare -agr AI_PLASMA_MINIMAL_PACKAGES=(
+declare -ag AI_PLASMA_PACKAGES=(
     plasma-desktop
-    sddm
-    konsole
-    dolphin
-    kate
-    ark
-    gwenview
-    spectacle
-    plasma-nm
-    plasma-pa
-    bluedevil
-    powerdevil
-    kde-gtk-config
-    breeze-gtk
-    kinfocenter
-    kdeplasma-addons
+    sddm sddm-kcm
+    konsole dolphin kate
+    ark gwenview spectacle
+    plasma-nm plasma-pa bluedevil
+    powerdevil breeze-gtk
+    kde-gtk-config kgamma5
     print-manager
     systemsettings
+    kcalc kclock
+    partitionmanager
+    xdg-user-dirs xdg-utils
 )
 
 # Paquetes para XFCE
-declare -agr AI_XFCE_PACKAGES=(
-    xfce4
-    xfce4-goodies
-    lightdm
-    lightdm-gtk-greeter
+declare -ag AI_XFCE_PACKAGES=(
+    xfce4 xfce4-goodies
+    lightdm lightdm-gtk-greeter
     network-manager-applet
-    pulseaudio
     xfce4-pulseaudio-plugin
-    firefox
+    xfce4-screenshooter
+    xfce4-taskmanager
+    mousepad ristretto
+    thunar-archive-plugin
+    xdg-user-dirs xdg-utils
 )
 
 # Paquetes para GNOME
-declare -agr AI_GNOME_PACKAGES=(
-    gnome
-    gnome-tweaks
+declare -ag AI_GNOME_PACKAGES=(
+    gnome gnome-tweaks
     gdm
-    firefox
+    gnome-terminal nautilus
+    gnome-calculator gnome-calendar
+    gnome-system-monitor
+    gnome-disk-utility
+    gnome-screenshot
+    xdg-user-dirs xdg-utils
 )
 
-# Drivers de video
-declare -agr AI_INTEL_DRIVER_PACKAGES=(mesa vulkan-intel intel-media-driver)
-declare -agr AI_AMD_DRIVER_PACKAGES=(mesa vulkan-radeon xf86-video-amdgpu)
-declare -agr AI_NVIDIA_DRIVER_PACKAGES=(nvidia nvidia-utils nvidia-settings)
-declare -agr AI_NVIDIA_LTS_DRIVER_PACKAGES=(nvidia-lts nvidia-utils nvidia-settings)
-declare -agr AI_VIRTUALBOX_DRIVER_PACKAGES=(virtualbox-guest-utils)
-declare -agr AI_VMWARE_DRIVER_PACKAGES=(xf86-video-vmware open-vm-tools)
-
-declare -ag AI_ADDITIONAL_PACKAGES=()
-declare -g AI_ADD_COMMON_ADDITIONAL_PACKAGES=true
-declare -ag AI_NEEDED_PACKAGES=(filesystem pacman)
-
-# Defines where to mount temporary new filesystem.
-declare -g AI_MOUNTPOINT_PATH=/mnt/
-
-bl.dictionary.set AI_KNOWN_DEPENDENCY_ALIASES libncursesw.so ncurses
-
-declare -ag AI_PACKAGE_SOURCE_URLS=(
-    'https://www.archlinux.org/mirrorlist/?country=all&protocol=https&ip_version=4&use_mirror_status=on'
+# Paquetes extra recomendados
+declare -ag AI_EXTRA_PACKAGES=(
+    firefox firefox-i18n-es-es
+    vlc
+    gimp
+    libreoffice-fresh libreoffice-fresh-es
+    hunspell hunspell-es
+    noto-fonts noto-fonts-emoji noto-fonts-cjk
+    ttf-dejavu ttf-liberation
+    pulseaudio pulseaudio-alsa pavucontrol
+    bluez bluez-utils blueman
+    cups cups-pdf hplip
+    avahi nss-mdns
+    unzip unrar p7zip zip
+    neovim
+    python python-pip
+    git-lfs
+    docker docker-compose
+    openssh
+    rsync
+    pacman-contrib
+    reflector
 )
-declare -ag AI_PACKAGE_URLS=(
-    https://mirrors.kernel.org/archlinux
-)
 
-declare -gi AI_NETWORK_TIMEOUT_IN_SECONDS=10
+# Drivers de GPU
+declare -ag AI_INTEL_DRIVERS=(mesa vulkan-intel intel-media-driver libva-intel-driver)
+declare -ag AI_AMD_DRIVERS=(mesa vulkan-radeon xf86-video-amdgpu libva-mesa-driver)
+declare -ag AI_NVIDIA_DRIVERS=(nvidia nvidia-utils nvidia-settings)
+declare -ag AI_NVIDIA_LTS_DRIVERS=(nvidia-lts nvidia-utils nvidia-settings)
+declare -ag AI_VMWARE_DRIVERS=(xf86-video-vmware mesa)
+declare -ag AI_VIRTUALBOX_DRIVERS=(virtualbox-guest-utils virtualbox-guest-modules-arch)
 
-declare -ag AI_UNNEEDED_FILE_LOCATIONS=(.INSTALL .PKGINFO var/cache/pacman)
+# ============================================================================
+# FUNCIONES DE UTILIDAD
+# ============================================================================
 
-## region command line arguments
-declare -g AI_AUTO_PARTITIONING=false
-declare -g AI_BOOT_ENTRY_LABEL=archLinux
-declare -g AI_BOOT_PARTITION_LABEL=uefiBoot
-declare -gi AI_BOOT_SPACE_IN_MEGA_BYTE=512
-declare -g AI_FALLBACK_BOOT_ENTRY_LABEL=archLinuxFallback
-
-declare -gi AI_NEEDED_SYSTEM_SPACE_IN_MEGA_BYTE=20480
-declare -g AI_SYSTEM_PARTITION_LABEL=system
-declare -g AI_SYSTEM_PARTITION_INSTALLATION_ONLY=false
-
-declare -g AI_COUNTRY_WITH_MIRRORS=Spain
-declare -g AI_LOCAL_TIME=Europe/Madrid
-declare -g AI_SYSTEM_LANGUAGE=en_US.UTF-8
-declare -g AI_KEYBOARD_LAYOUT=es
-
-declare -g AI_CPU_ARCHITECTURE="$(uname -m)"
-declare -g AI_HOST_NAME='archlinux'
-declare -g AI_DESKTOP_ENVIRONMENT='none'
-declare -g AI_INSTALL_AUR_HELPER=false
-declare -g AI_SWAP_SIZE=4096
-declare -g AI_INSTALL_DRIVERS=true
-declare -g AI_VIDEO_DRIVER='auto'
-
-declare -ag AI_NEEDED_SERVICES=(NetworkManager bluetooth cups avahi-daemon cronie)
-
-declare -g AI_TARGET=archInstall
-
-declare -g AI_ENCRYPT=false
-declare -g AI_PASSWORD=archlinux
-declare -ag AI_USER_NAMES=('user')
-declare -g AI_USER_PASSWORD='archlinux'
-
-declare -g AI_PREVENT_USING_NATIVE_ARCH_CHANGEROOT=false
-declare -g AI_PREVENT_USING_EXISTING_PACMAN=false
-declare -g AI_AUTOMATIC_REBOOT=false
-## endregion
-
-BL_MODULE_FUNCTION_SCOPE_REWRITES+=('^archinstall([._][a-zA-Z_-]+)?$/ai\1/')
-BL_MODULE_GLOBAL_SCOPE_REWRITES+=('^ARCHINSTALL(_[a-zA-Z_-]+)?$/AI\1/')
-# endregion
-# region functions
-## region command line interface
-alias ai.get_commandline_option_description=ai_get_commandline_option_description
-ai_get_commandline_option_description() {
-    local -r __documentation__='
-        Prints descriptions about each available command line option.
-
-        >>> ai.get_commandline_option_description
-        +bl.doctest.contains
-        +bl.doctest.multiline_ellipsis
-        -h --help Shows this help message.
-        ...
-    '
-    cat << 'EOF'
--h --help Shows this help message.
-
--v --verbose Tells you what is going on.
-
--d --debug Gives you any output from all tools which are used.
-
-
--u --user-names [USER_NAMES [USER_NAMES ...]] Defines user names for new system (default: "user").
-
--p --user-password PASSWORD Defines password for users (default: "archlinux").
-
--n --host-name HOST_NAME Defines name for new system (default: "archlinux").
-
-
--c --cpu-architecture CPU_ARCHITECTURE Defines architecture (default: from uname -m).
-
--t --target TARGET Defines where to install new operating system (default: "archInstall").
-
-
--l --local-time LOCAL_TIME Local time for your system (default: "Europe/Madrid").
-
--i --keyboard-layout LAYOUT Defines keyboard layout (default: "es").
-
--L --system-language LANGUAGE System language (default: "en_US.UTF-8").
-
--m --country-with-mirrors COUNTRY Country for enabling servers to get packages from (default: "Spain").
-
-
--D --desktop-environment DESKTOP Desktop environment to install (none, plasma-minimal, xfce, gnome) (default: "none").
-
--A --install-aur-helper Install AUR helper (yay) (default: false).
-
--S --swap-size SIZE_MB Swap size in MB (0 for no swap) (default: 4096).
-
--V --video-driver DRIVER Video driver (auto, intel, amd, nvidia, nvidia-lts, virtualbox, vmware) (default: "auto").
-
--dr --no-drivers Skip driver installation (default: false).
-
-
--r --reboot Reboot after finishing installation.
-
--a --auto-partitioning Defines to do partitioning on founded block device automatic.
-
-
--b --boot-partition-label LABEL Partition label for uefi boot partition (default: "uefiBoot").
-
--s --system-partition-label LABEL Partition label for system partition (default: "system").
-
-
--e --boot-entry-label LABEL Boot entry label (default: "archLinux").
-
--f --fallback-boot-entry-label LABEL Fallback boot entry label (default: "archLinuxFallback").
-
-
--w --boot-space-in-mega-byte NUMBER Minimum space for boot partition (default: "512 MB").
-
--q --needed-system-space-in-mega-byte NUMBER Minimum space for system partition (default: "20480 MB").
-
-
--z --add-common-additional-packages Install common additional packages (default: true).
-
--g --additional-packages [PACKAGES [PACKAGES ...]] Additional packages to install.
-
--j --needed-services [SERVICES [SERVICES ...]] Services to enable.
-
--o --cache-path PATH Define where to load and save downloaded dependencies.
-
-
--P --system-partition-installation-only Interpret given input as single partition only.
-
--E --encrypt Encrypts system partition.
-
--pa --password Password to use for root login (and encryption if enabled).
-
-
--x --timeout NUMBER_OF_SECONDS Defines time to wait for requests (default: 10).
-
-Presets:
-
---quick-install TARGET Is the same as "--auto-partitioning --desktop plasma-minimal --install-aur-helper --host-name archlinux --target TARGET".
-EOF
-}
-
-alias ai.get_help_message=ai_get_help_message
-ai_get_help_message() {
-    local -r __documentation__='
-        Provides a help message for this module.
-
-        >>> ai.get_help_message
-        +bl.doctest.contains
-        +bl.doctest.multiline_ellipsis
-        ...
-        Usage: arch-install [options]
-        ...
-    '
-    echo -e $'\nUsage: arch-install [options]\n'
-    echo -e "$AI__DOCUMENTATION__"
-    echo -e $'\nOption descriptions:\n'
-    ai.get_commandline_option_description "$@"
-    echo
-}
-
-alias ai.interactive_menu=ai_interactive_menu
-ai_interactive_menu() {
-    local -r __documentation__='
-        Muestra un menú interactivo para configurar la instalación.
-    '
+# Función para imprimir mensajes con colores
+print_msg() {
+    local type="$1"
+    local message="$2"
     
-    if [ "$AI_TARGET" = "archInstall" ]; then
-        echo "╔══════════════════════════════════════════╗"
-        echo "║    Configuración Interactiva Arch Linux  ║"
-        echo "╚══════════════════════════════════════════╝"
-        echo ""
-        
-        # Seleccionar target
-        echo "Discos disponibles:"
-        lsblk -d -o NAME,SIZE,TYPE,MODEL | grep -v "loop"
-        echo ""
-        read -p "¿Dónde instalar? (ej: /dev/sda): " AI_TARGET
-        
-        # Hostname
-        read -p "Hostname [archlinux]: " input
-        AI_HOST_NAME="${input:-archlinux}"
-        
-        # Usuarios
-        echo "Usuarios (separados por espacio) [user]: "
-        read -p "> " input
-        AI_USER_NAMES=(${input:-user})
-        
-        # Contraseña de usuario
-        read -sp "Contraseña para usuarios [archlinux]: " AI_USER_PASSWORD
-        AI_USER_PASSWORD="${AI_USER_PASSWORD:-archlinux}"
-        echo ""
-        
-        # Entorno de escritorio
-        echo ""
-        echo "Selecciona entorno de escritorio:"
-        echo "1) Ninguno (solo CLI)"
-        echo "2) Plasma mínimo (KDE)"
-        echo "3) XFCE"
-        echo "4) GNOME"
-        read -p "Opción [2]: " de_choice
-        
-        case "${de_choice:-2}" in
-            1) AI_DESKTOP_ENVIRONMENT="none" ;;
-            2) AI_DESKTOP_ENVIRONMENT="plasma-minimal" ;;
-            3) AI_DESKTOP_ENVIRONMENT="xfce" ;;
-            4) AI_DESKTOP_ENVIRONMENT="gnome" ;;
-            *) AI_DESKTOP_ENVIRONMENT="plasma-minimal" ;;
-        esac
-        
-        # AUR helper
-        read -p "¿Instalar yay (AUR helper)? [S/n]: " aur_choice
-        if [[ "${aur_choice,,}" =~ ^(n|no)$ ]]; then
-            AI_INSTALL_AUR_HELPER=false
-        else
-            AI_INSTALL_AUR_HELPER=true
-        fi
-        
-        # Swap
-        read -p "Tamaño de swap en MB [4096]: " swap_input
-        AI_SWAP_SIZE="${swap_input:-4096}"
-        
-        # Cifrado
-        read -p "¿Cifrar disco? [s/N]: " encrypt_choice
-        if [[ "${encrypt_choice,,}" =~ ^(s|si|y|yes)$ ]]; then
-            AI_ENCRYPT=true
-            read -sp "Contraseña de cifrado [archlinux]: " AI_PASSWORD
-            AI_PASSWORD="${AI_PASSWORD:-archlinux}"
-            echo ""
-        fi
-        
-        # Auto particionamiento
-        read -p "¿Particionamiento automático? [S/n]: " auto_part
-        if [[ "${auto_part,,}" =~ ^(n|no)$ ]]; then
-            AI_AUTO_PARTITIONING=false
-        else
-            AI_AUTO_PARTITIONING=true
-        fi
-        
-        echo ""
-        echo "Resumen de configuración:"
-        echo "──────────────────────────────"
-        echo "• Disco: $AI_TARGET"
-        echo "• Hostname: $AI_HOST_NAME"
-        echo "• Usuarios: ${AI_USER_NAMES[*]}"
-        echo "• Entorno: $AI_DESKTOP_ENVIRONMENT"
-        echo "• AUR helper: $AI_INSTALL_AUR_HELPER"
-        echo "• Swap: ${AI_SWAP_SIZE}MB"
-        echo "• Cifrado: $AI_ENCRYPT"
-        echo "• Auto particionamiento: $AI_AUTO_PARTITIONING"
-        echo ""
-        
-        read -p "¿Continuar con la instalación? [S/n]: " confirm
-        if [[ "${confirm,,}" =~ ^(n|no)$ ]]; then
-            echo "Instalación cancelada."
-            exit 0
-        fi
-        
-        echo ""
-        echo "🚀 Iniciando instalación..."
-        echo ""
-    fi
-}
-
-alias ai.commandline_interface=ai_commandline_interface
-ai_commandline_interface() {
-    local -r __documentation__='
-        Provides the command line interface and interactive questions.
-    '
-    bl.logging.set_command_level debug
-    
-    # Si no hay argumentos, mostrar menú interactivo
-    if [ $# -eq 0 ]; then
-        ai.interactive_menu
-        return 0
-    fi
-    
-    while true; do
-        case "$1" in
-            -h|--help)
-                shift
-                bl.logging.plain "$(ai.get_help_message "$0")"
-                exit 0
-                ;;
-            -v|--verbose)
-                shift
-                if ! bl.logging.is_enabled info; then
-                    bl.logging.set_level info
-                fi
-                ;;
-            -d|--debug)
-                shift
-                bl.logging.set_level debug
-                ;;
-
-            -u|--user-names)
-                shift
-                AI_USER_NAMES=()
-                while [[ "$1" =~ ^[^-].+$ ]]; do
-                    AI_USER_NAMES+=("$1")
-                    shift
-                done
-                ;;
-            --user-password)
-                shift
-                AI_USER_PASSWORD="$1"
-                shift
-                ;;
-            -n|--host-name)
-                shift
-                AI_HOST_NAME="$1"
-                shift
-                ;;
-
-            -c|--cpu-architecture)
-                shift
-                AI_CPU_ARCHITECTURE="$1"
-                shift
-                ;;
-            -t|--target)
-                shift
-                AI_TARGET="$1"
-                shift
-                ;;
-
-            -l|--local-time)
-                shift
-                AI_LOCAL_TIME="$1"
-                shift
-                ;;
-            -i|--keyboard-layout)
-                shift
-                AI_KEYBOARD_LAYOUT="$1"
-                shift
-                ;;
-            -L|--system-language)
-                shift
-                AI_SYSTEM_LANGUAGE="$1"
-                shift
-                ;;
-            -m|--country-with-mirrors)
-                shift
-                AI_COUNTRY_WITH_MIRRORS="$1"
-                shift
-                ;;
-
-            -D|--desktop-environment)
-                shift
-                AI_DESKTOP_ENVIRONMENT="$1"
-                shift
-                ;;
-            -A|--install-aur-helper)
-                shift
-                AI_INSTALL_AUR_HELPER=true
-                ;;
-            -S|--swap-size)
-                shift
-                AI_SWAP_SIZE="$1"
-                shift
-                ;;
-            -V|--video-driver)
-                shift
-                AI_VIDEO_DRIVER="$1"
-                shift
-                ;;
-            --no-drivers)
-                shift
-                AI_INSTALL_DRIVERS=false
-                ;;
-
-            -r|--reboot)
-                shift
-                AI_AUTOMATIC_REBOOT=true
-                ;;
-            -a|--auto-partitioning)
-                shift
-                AI_AUTO_PARTITIONING=true
-                ;;
-            -p|--prevent-using-existing-pacman)
-                shift
-                AI_PREVENT_USING_EXISTING_PACMAN=true
-                ;;
-            -y|--prevent-using-native-arch-chroot)
-                shift
-                AI_PREVENT_USING_NATIVE_ARCH_CHANGEROOT=true
-                ;;
-
-            -b|--boot-partition-label)
-                shift
-                AI_BOOT_PARTITION_LABEL="$1"
-                shift
-                ;;
-            -s|--system-partition-label)
-                shift
-                AI_SYSTEM_PARTITION_LABEL="$1"
-                shift
-                ;;
-
-            -e|--boot-entry-label)
-                shift
-                AI_BOOT_ENTRY_LABEL="$1"
-                shift
-                ;;
-            -f|--fallback-boot-entry-label)
-                shift
-                AI_FALLBACK_BOOT_ENTRY_LABEL="$1"
-                shift
-                ;;
-
-            -w|--boot-space-in-mega-byte)
-                shift
-                AI_BOOT_SPACE_IN_MEGA_BYTE="$1"
-                shift
-                ;;
-            -q|--needed-system-space-in-mega-byte)
-                shift
-                AI_NEEDED_SYSTEM_SPACE_IN_MEGA_BYTE="$1"
-                shift
-                ;;
-
-            -z|--add-common-additional-packages)
-                shift
-                AI_ADD_COMMON_ADDITIONAL_PACKAGES=true
-                ;;
-            -g|--additional-packages)
-                shift
-                while [[ "$1" =~ ^[^-].+$ ]]; do
-                    AI_ADDITIONAL_PACKAGES+=("$1")
-                    shift
-                done
-                ;;
-            -j|--needed-services)
-                shift
-                while [[ "$1" =~ ^[^-].+$ ]]; do
-                    AI_NEEDED_SERVICES+=("$1")
-                    shift
-                done
-                ;;
-            -o|--cache-path)
-                shift
-                AI_CACHE_PATH="${1%/}/"
-                shift
-                ;;
-
-            -P|--system-partition-installation-only)
-                shift
-                AI_SYSTEM_PARTITION_INSTALLATION_ONLY=true
-                ;;
-
-            -E|--encrypt)
-                shift
-                AI_ENCRYPT=true
-                ;;
-            -pa|--password)
-                shift
-                AI_PASSWORD="$1"
-                shift
-                ;;
-
-            -x|--timeout)
-                shift
-                AI_NETWORK_TIMEOUT_IN_SECONDS="$1"
-                shift
-                ;;
-
-            --quick-install)
-                shift
-                AI_AUTO_PARTITIONING=true
-                AI_DESKTOP_ENVIRONMENT=plasma-minimal
-                AI_INSTALL_AUR_HELPER=true
-                AI_HOST_NAME=archlinux
-                AI_TARGET="$1"
-                bl.logging.set_level debug
-                shift
-                ;;
-
-            '')
-                shift || true
-                break
-                ;;
-            *)
-                bl.logging.error "Argumento inválido: \"${1}\""
-                bl.logging.plain "$(ai.get_help_message)"
-                return 1
-        esac
-    done
-    
-    # Validaciones
-    if [[ "$UID" != 0 ]] && ! {
-        hash fakeroot 2>/dev/null && \
-        hash fakechroot 2>/dev/null && \
-        { [ -e "$AI_TARGET" ] && [ -d "$AI_TARGET" ]; }
-    }; then
-        bl.logging.error_exception \
-            "Debes ejecutar este script como \"root\" o instalar \"fakeroot\" y \"fakechroot\" para instalar en un directorio."
-    fi
-    
-    # Auto-detección de partición única
-    if ! $AI_SYSTEM_PARTITION_INSTALLATION_ONLY && \
-       ! $AI_AUTO_PARTITIONING && \
-       echo "$AI_TARGET" | grep --quiet --extended-regexp '[0-9]$'; then
-        AI_SYSTEM_PARTITION_INSTALLATION_ONLY=true
-    fi
-    
-    return 0
-}
-## endregion
-
-## region helper functions
-### region change root functions
-alias ai.changeroot=ai_changeroot
-ai_changeroot() {
-    local -r __documentation__='
-        This function emulates the arch linux native "arch-chroot" function.
-    '
-    if ! $AI_PREVENT_USING_NATIVE_ARCH_CHANGEROOT && hash arch-chroot 2>/dev/null; then
-        if [ "$1" = / ]; then
-            shift
-            "$@"
-            return $?
-        fi
-        arch-chroot "$@"
-        return $?
-    fi
-    bl.changeroot "$@"
-    return $?
-}
-
-alias ai.changeroot_to_mountpoint=ai_changeroot_to_mountpoint
-ai_changeroot_to_mountpoint() {
-    local -r __documentation__='
-        This function performs a changeroot to currently set mountpoint path.
-    '
-    ai.changeroot "$AI_MOUNTPOINT_PATH" "$@"
-    return $?
-}
-### endregion
-
-alias ai.detect_hardware=ai_detect_hardware
-ai_detect_hardware() {
-    local -r __documentation__='
-        Detecta el hardware para instalar drivers apropiados.
-    '
-    bl.logging.info "Detectando hardware..."
-    
-    # Detectar tarjeta gráfica
-    if lspci | grep -i "nvidia" > /dev/null; then
-        bl.logging.info "Detectada tarjeta NVIDIA"
-        AI_VIDEO_DRIVER="nvidia"
-    elif lspci | grep -i "amd" | grep -i "vga" > /dev/null; then
-        bl.logging.info "Detectada tarjeta AMD"
-        AI_VIDEO_DRIVER="amd"
-    elif lspci | grep -i "intel" | grep -i "vga" > /dev/null; then
-        bl.logging.info "Detectada tarjeta Intel"
-        AI_VIDEO_DRIVER="intel"
-    elif systemd-detect-virt | grep -i "oracle" > /dev/null; then
-        bl.logging.info "Detectado VirtualBox"
-        AI_VIDEO_DRIVER="virtualbox"
-    elif systemd-detect-virt | grep -i "vmware" > /dev/null; then
-        bl.logging.info "Detectado VMware"
-        AI_VIDEO_DRIVER="vmware"
-    else
-        bl.logging.info "Usando drivers genéricos"
-        AI_VIDEO_DRIVER="intel" # Por defecto
-    fi
-}
-
-alias ai.install_drivers=ai_install_drivers
-ai_install_drivers() {
-    local -r __documentation__='
-        Instala drivers según la detección de hardware.
-    '
-    if ! $AI_INSTALL_DRIVERS; then
-        bl.logging.info "Saltando instalación de drivers"
-        return 0
-    fi
-    
-    bl.logging.info "Instalando drivers para: $AI_VIDEO_DRIVER"
-    
-    case "$AI_VIDEO_DRIVER" in
-        intel)
-            ai.changeroot_to_mountpoint pacman -S --noconfirm "${AI_INTEL_DRIVER_PACKAGES[@]}"
+    case "$type" in
+        "info")
+            echo -e "\033[1;34m[*]\033[0m $message"
             ;;
-        amd)
-            ai.changeroot_to_mountpoint pacman -S --noconfirm "${AI_AMD_DRIVER_PACKAGES[@]}"
+        "success")
+            echo -e "\033[1;32m[+]\033[0m $message"
             ;;
-        nvidia)
-            ai.changeroot_to_mountpoint pacman -S --noconfirm "${AI_NVIDIA_DRIVER_PACKAGES[@]}"
+        "warning")
+            echo -e "\033[1;33m[!]\033[0m $message"
             ;;
-        nvidia-lts)
-            ai.changeroot_to_mountpoint pacman -S --noconfirm "${AI_NVIDIA_LTS_DRIVER_PACKAGES[@]}"
+        "error")
+            echo -e "\033[1;31m[-]\033[0m $message"
             ;;
-        virtualbox)
-            ai.changeroot_to_mountpoint pacman -S --noconfirm "${AI_VIRTUALBOX_DRIVER_PACKAGES[@]}"
-            ai.changeroot_to_mountpoint systemctl enable vboxservice.service
+        "input")
+            echo -e "\033[1;36m[?]\033[0m $message"
             ;;
-        vmware)
-            ai.changeroot_to_mountpoint pacman -S --noconfirm "${AI_VMWARE_DRIVER_PACKAGES[@]}"
-            ai.changeroot_to_mountpoint systemctl enable vmtoolsd.service vmware-vmblock-fuse.service
-            ;;
-    esac
-}
-
-alias ai.setup_swap=ai_setup_swap
-ai_setup_swap() {
-    local -r __documentation__='
-        Configura el archivo swap.
-    '
-    if [ "$AI_SWAP_SIZE" -gt 0 ]; then
-        bl.logging.info "Creando archivo swap de ${AI_SWAP_SIZE}MB"
-        ai.changeroot_to_mountpoint fallocate -l "${AI_SWAP_SIZE}M" /swapfile
-        ai.changeroot_to_mountpoint chmod 600 /swapfile
-        ai.changeroot_to_mountpoint mkswap /swapfile
-        ai.changeroot_to_mountpoint swapon /swapfile
-        echo '/swapfile none swap defaults 0 0' >> "${AI_MOUNTPOINT_PATH}/etc/fstab"
-    fi
-}
-
-alias ai.configure_locale=ai_configure_locale
-ai_configure_locale() {
-    local -r __documentation__='
-        Configura el idioma del sistema.
-    '
-    bl.logging.info "Configurando idioma: $AI_SYSTEM_LANGUAGE"
-    
-    # Configurar locale
-    echo "$AI_SYSTEM_LANGUAGE UTF-8" >> "${AI_MOUNTPOINT_PATH}/etc/locale.gen"
-    echo "LANG=$AI_SYSTEM_LANGUAGE" > "${AI_MOUNTPOINT_PATH}/etc/locale.conf"
-    echo "LC_COLLATE=C" >> "${AI_MOUNTPOINT_PATH}/etc/locale.conf"
-    
-    ai.changeroot_to_mountpoint locale-gen
-    
-    # Configurar teclado
-    echo "KEYMAP=$AI_KEYBOARD_LAYOUT" > "${AI_MOUNTPOINT_PATH}/etc/vconsole.conf"
-    echo "FONT=lat9w-16" >> "${AI_MOUNTPOINT_PATH}/etc/vconsole.conf"
-}
-
-alias ai.install_desktop_environment=ai_install_desktop_environment
-ai_install_desktop_environment() {
-    local -r __documentation__='
-        Instala el entorno de escritorio seleccionado.
-    '
-    case "$AI_DESKTOP_ENVIRONMENT" in
-        plasma-minimal)
-            bl.logging.info "Instalando Plasma mínimo..."
-            ai.changeroot_to_mountpoint pacman -S --noconfirm "${AI_PLASMA_MINIMAL_PACKAGES[@]}"
-            ai.changeroot_to_mountpoint systemctl enable sddm.service
-            ;;
-        xfce)
-            bl.logging.info "Instalando XFCE..."
-            ai.changeroot_to_mountpoint pacman -S --noconfirm "${AI_XFCE_PACKAGES[@]}"
-            ai.changeroot_to_mountpoint systemctl enable lightdm.service
-            ;;
-        gnome)
-            bl.logging.info "Instalando GNOME..."
-            ai.changeroot_to_mountpoint pacman -S --noconfirm "${AI_GNOME_PACKAGES[@]}"
-            ai.changeroot_to_mountpoint systemctl enable gdm.service
-            ;;
-        none)
-            bl.logging.info "No se instalará entorno de escritorio."
+        "step")
+            echo -e "\n\033[1;35m[→]\033[0m \033[1;37m$message\033[0m"
             ;;
         *)
-            bl.logging.warn "Entorno de escritorio desconocido: $AI_DESKTOP_ENVIRONMENT"
+            echo "$message"
             ;;
     esac
 }
 
-alias ai.install_aur_helper=ai_install_aur_helper
-ai_install_aur_helper() {
-    local -r __documentation__='
-        Instala yay (AUR helper).
-    '
-    if $AI_INSTALL_AUR_HELPER; then
-        bl.logging.info "Instalando yay (AUR helper)..."
+# Función para confirmar acciones
+confirm() {
+    local prompt="$1"
+    
+    if [ "$AI_SKIP_CONFIRM" = true ]; then
+        return 0
+    fi
+    
+    print_msg "input" "$prompt [s/N]"
+    read -r response
+    
+    case "$response" in
+        [sS][iI]|[sS]|[yY][eE][sS]|[yY])
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Función para verificar conexión a internet
+check_internet() {
+    print_msg "info" "Verificando conexión a internet..."
+    
+    if ping -c 3 archlinux.org >/dev/null 2>&1; then
+        print_msg "success" "Conexión a internet verificada"
+        return 0
+    else
+        print_msg "error" "No hay conexión a internet"
         
-        # Crear usuario temporal para compilar yay
-        ai.changeroot_to_mountpoint useradd -m -G wheel -s /bin/bash aurhelper
-        echo "aurhelper:aurhelper" | ai.changeroot_to_mountpoint chpasswd
+        if confirm "¿Configurar conexión de red?"; then
+            setup_network
+            return $?
+        else
+            return 1
+        fi
+    fi
+}
+
+# Función para configurar red
+setup_network() {
+    print_msg "step" "Configuración de red"
+    
+    # Mostrar interfaces de red
+    ip link show
+    
+    print_msg "input" "Seleccione opción:"
+    echo "1) Ethernet (cable)"
+    echo "2) WiFi"
+    echo "3) Usar conexión existente"
+    read -r network_choice
+    
+    case "$network_choice" in
+        1)
+            # Ethernet
+            dhcpcd || systemctl start dhcpcd
+            ;;
+        2)
+            # WiFi
+            if command -v iwctl >/dev/null; then
+                print_msg "info" "Usando iwd..."
+                iwctl
+            elif command -v wifi-menu >/dev/null; then
+                print_msg "info" "Usando wifi-menu..."
+                wifi-menu
+            else
+                print_msg "error" "No se encontraron herramientas WiFi"
+                return 1
+            fi
+            ;;
+        3)
+            # Asumir conexión existente
+            print_msg "info" "Usando conexión existente"
+            ;;
+        *)
+            print_msg "error" "Opción inválida"
+            return 1
+            ;;
+    esac
+    
+    # Verificar nuevamente
+    check_internet
+}
+
+# Función para detectar hardware
+detect_hardware() {
+    print_msg "step" "Detección de hardware"
+    
+    # Detectar UEFI/BIOS
+    if [ -d /sys/firmware/efi ]; then
+        print_msg "info" "Sistema UEFI detectado"
+        AI_UEFI=true
+    else
+        print_msg "info" "Sistema BIOS detectado"
+        AI_UEFI=false
+    fi
+    
+    # Detectar GPU
+    if lspci | grep -i "nvidia" > /dev/null; then
+        print_msg "info" "GPU NVIDIA detectada"
+        AI_GPU_DRIVER="nvidia"
+    elif lspci | grep -i "amd" | grep -i "vga" > /dev/null; then
+        print_msg "info" "GPU AMD detectada"
+        AI_GPU_DRIVER="amd"
+    elif lspci | grep -i "intel" | grep -i "vga" > /dev/null; then
+        print_msg "info" "GPU Intel detectada"
+        AI_GPU_DRIVER="intel"
+    elif systemd-detect-virt | grep -i "vmware" > /dev/null; then
+        print_msg "info" "VMware detectado"
+        AI_GPU_DRIVER="vmware"
+    elif systemd-detect-virt | grep -i "oracle" > /dev/null; then
+        print_msg "info" "VirtualBox detectado"
+        AI_GPU_DRIVER="virtualbox"
+    else
+        print_msg "warning" "GPU no detectada, usando drivers genéricos"
+        AI_GPU_DRIVER="intel"
+    fi
+    
+    print_msg "success" "Detección completada"
+}
+
+# ============================================================================
+# FUNCIONES DE PARTICIONADO
+# ============================================================================
+
+# Función para seleccionar dispositivo
+select_device() {
+    print_msg "step" "Selección de dispositivo"
+    
+    echo "Dispositivos disponibles:"
+    lsblk -d -o NAME,SIZE,TYPE,MODEL | grep -v "loop"
+    
+    if [ "$AI_TARGET" = "/dev/sda" ]; then
+        print_msg "input" "Ingrese dispositivo (ej: /dev/sda) [/dev/sda]:"
+        read -r user_device
+        AI_TARGET="${user_device:-/dev/sda}"
+    fi
+    
+    AI_BOOT_PARTITION="${AI_TARGET}1"
+    AI_ROOT_PARTITION="${AI_TARGET}2"
+    AI_SWAP_PARTITION="${AI_TARGET}3"
+    
+    print_msg "info" "Dispositivo seleccionado: $AI_TARGET"
+}
+
+# Función para particionar disco
+partition_disk() {
+    print_msg "step" "Particionado del disco"
+    
+    if ! confirm "¿Particionar $AI_TARGET? (Todos los datos serán eliminados)"; then
+        return 1
+    fi
+    
+    # Limpiar tabla de particiones
+    print_msg "info" "Limpiando tabla de particiones..."
+    sgdisk -Z "$AI_TARGET"
+    wipefs -a "$AI_TARGET"
+    
+    if [ "$AI_UEFI" = true ]; then
+        # Particionado UEFI
+        print_msg "info" "Creando particiones UEFI..."
+        
+        # Partición ESP (boot)
+        sgdisk -n 1:0:+512M -t 1:ef00 -c 1:"ESP" "$AI_TARGET"
+        
+        # Partición swap (opcional)
+        if [ "$AI_SWAP_SIZE" -gt 0 ]; then
+            sgdisk -n 2:0:+${AI_SWAP_SIZE}M -t 2:8200 -c 2:"SWAP" "$AI_TARGET"
+            # Partición root
+            sgdisk -n 3:0:0 -t 3:8304 -c 3:"ROOT" "$AI_TARGET"
+            AI_ROOT_PARTITION="${AI_TARGET}3"
+        else
+            # Solo partición root
+            sgdisk -n 2:0:0 -t 2:8304 -c 2:"ROOT" "$AI_TARGET"
+            AI_ROOT_PARTITION="${AI_TARGET}2"
+        fi
+    else
+        # Particionado BIOS
+        print_msg "info" "Creando particiones BIOS..."
+        
+        # Partición boot
+        sgdisk -n 1:0:+1M -t 1:ef02 -c 1:"BIOS Boot" "$AI_TARGET"
+        
+        # Partición swap (opcional)
+        if [ "$AI_SWAP_SIZE" -gt 0 ]; then
+            sgdisk -n 2:0:+${AI_SWAP_SIZE}M -t 2:8200 -c 2:"SWAP" "$AI_TARGET"
+            # Partición root
+            sgdisk -n 3:0:0 -t 3:8304 -c 3:"ROOT" "$AI_TARGET"
+            AI_ROOT_PARTITION="${AI_TARGET}3"
+        else
+            # Solo partición root
+            sgdisk -n 2:0:0 -t 2:8304 -c 2:"ROOT" "$AI_TARGET"
+            AI_ROOT_PARTITION="${AI_TARGET}2"
+        fi
+    fi
+    
+    print_msg "success" "Particionado completado"
+    
+    # Sincronizar y mostrar resultado
+    partprobe "$AI_TARGET"
+    sleep 2
+    lsblk "$AI_TARGET"
+}
+
+# Función para formatear particiones
+format_partitions() {
+    print_msg "step" "Formateo de particiones"
+    
+    # Formatear partición boot (UEFI)
+    if [ "$AI_UEFI" = true ]; then
+        print_msg "info" "Formateando ESP..."
+        mkfs.fat -F32 "$AI_BOOT_PARTITION"
+    fi
+    
+    # Formatear swap
+    if [ "$AI_SWAP_SIZE" -gt 0 ]; then
+        print_msg "info" "Formateando swap..."
+        mkswap "$AI_SWAP_PARTITION"
+        swapon "$AI_SWAP_PARTITION"
+    fi
+    
+    # Cifrar partición root si está habilitado
+    if [ "$AI_ENCRYPT_DISK" = true ]; then
+        print_msg "info" "Cifrando partición root..."
+        echo "$AI_LUKS_PASSWORD" | cryptsetup luksFormat "$AI_ROOT_PARTITION"
+        echo "$AI_LUKS_PASSWORD" | cryptsetup open "$AI_ROOT_PARTITION" "$AI_LUKS_DEVICE"
+        ROOT_DEVICE="/dev/mapper/$AI_LUKS_DEVICE"
+    else
+        ROOT_DEVICE="$AI_ROOT_PARTITION"
+    fi
+    
+    # Formatear partición root
+    print_msg "info" "Formateando root con ext4..."
+    mkfs.ext4 -F "$ROOT_DEVICE"
+    
+    # Montar particiones
+    print_msg "info" "Montando particiones..."
+    mount "$ROOT_DEVICE" "$AI_MOUNTPOINT"
+    
+    if [ "$AI_UEFI" = true ]; then
+        mkdir -p "$AI_MOUNTPOINT/boot"
+        mount "$AI_BOOT_PARTITION" "$AI_MOUNTPOINT/boot"
+    fi
+    
+    print_msg "success" "Formateo completado"
+}
+
+# ============================================================================
+# FUNCIONES DE INSTALACIÓN
+# ============================================================================
+
+# Función para configurar mirrorlist
+configure_mirrors() {
+    print_msg "step" "Configurando mirrors"
+    
+    # Hacer backup del mirrorlist
+    cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.backup
+    
+    # Usar reflector para obtener mejores mirrors
+    if command -v reflector >/dev/null; then
+        print_msg "info" "Obteniendo mejores mirrors..."
+        reflector --country Spain --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
+    else
+        print_msg "warning" "Reflector no instalado, usando mirrors por defecto"
+    fi
+    
+    # Actualizar bases de datos
+    print_msg "info" "Actualizando bases de datos..."
+    pacman -Syy
+}
+
+# Función para instalar sistema base
+install_base() {
+    print_msg "step" "Instalando sistema base"
+    
+    # Instalar paquetes base
+    print_msg "info" "Instalando paquetes base..."
+    pacstrap "$AI_MOUNTPOINT" "${AI_BASE_PACKAGES[@]}"
+    
+    # Generar fstab
+    print_msg "info" "Generando fstab..."
+    genfstab -U "$AI_MOUNTPOINT" >> "$AI_MOUNTPOINT/etc/fstab"
+    
+    # Añadir entrada swap si existe
+    if [ "$AI_SWAP_SIZE" -gt 0 ]; then
+        echo "# Swap partition" >> "$AI_MOUNTPOINT/etc/fstab"
+        echo "$AI_SWAP_PARTITION none swap defaults 0 0" >> "$AI_MOUNTPOINT/etc/fstab"
+    fi
+    
+    print_msg "success" "Sistema base instalado"
+}
+
+# Función para configurar sistema
+configure_system() {
+    print_msg "step" "Configurando sistema"
+    
+    # Configurar zona horaria
+    print_msg "info" "Configurando zona horaria..."
+    arch-chroot "$AI_MOUNTPOINT" ln -sf "/usr/share/zoneinfo/$AI_TIMEZONE" /etc/localtime
+    arch-chroot "$AI_MOUNTPOINT" hwclock --systohc
+    
+    # Configurar locale
+    print_msg "info" "Configurando locale..."
+    sed -i "s/#$AI_LOCALE/$AI_LOCALE/" "$AI_MOUNTPOINT/etc/locale.gen"
+    arch-chroot "$AI_MOUNTPOINT" locale-gen
+    echo "LANG=$AI_LOCALE" > "$AI_MOUNTPOINT/etc/locale.conf"
+    echo "KEYMAP=$AI_KEYMAP" > "$AI_MOUNTPOINT/etc/vconsole.conf"
+    
+    # Configurar hostname
+    print_msg "info" "Configurando hostname..."
+    echo "$AI_HOST_NAME" > "$AI_MOUNTPOINT/etc/hostname"
+    
+    # Configurar hosts
+    cat > "$AI_MOUNTPOINT/etc/hosts" << EOF
+127.0.0.1   localhost
+::1         localhost
+127.0.1.1   $AI_HOST_NAME.localdomain   $AI_HOST_NAME
+EOF
+    
+    # Configurar contraseñas
+    print_msg "info" "Configurando contraseñas..."
+    echo "root:$AI_ROOT_PASSWORD" | arch-chroot "$AI_MOUNTPOINT" chpasswd
+    
+    # Crear usuario
+    print_msg "info" "Creando usuario..."
+    arch-chroot "$AI_MOUNTPOINT" useradd -m -G wheel,audio,video,storage,optical -s /bin/bash "$AI_USER_NAME"
+    echo "$AI_USER_NAME:$AI_USER_PASSWORD" | arch-chroot "$AI_MOUNTPOINT" chpasswd
+    
+    # Configurar sudo
+    print_msg "info" "Configurando sudo..."
+    echo "$AI_USER_NAME ALL=(ALL) ALL" >> "$AI_MOUNTPOINT/etc/sudoers.d/$AI_USER_NAME"
+    chmod 440 "$AI_MOUNTPOINT/etc/sudoers.d/$AI_USER_NAME"
+    
+    print_msg "success" "Configuración del sistema completada"
+}
+
+# Función para instalar bootloader
+install_bootloader() {
+    print_msg "step" "Instalando bootloader"
+    
+    if [ "$AI_UEFI" = true ]; then
+        # Instalar GRUB para UEFI
+        print_msg "info" "Instalando GRUB para UEFI..."
+        arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm grub efibootmgr
+        
+        # Configurar GRUB
+        if [ "$AI_ENCRYPT_DISK" = true ]; then
+            # Configurar GRUB para LUKS
+            sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="/&cryptdevice='"$AI_ROOT_PARTITION"':'"$AI_LUKS_DEVICE"' /' "$AI_MOUNTPOINT/etc/default/grub"
+        fi
+        
+        arch-chroot "$AI_MOUNTPOINT" grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
+    else
+        # Instalar GRUB para BIOS
+        print_msg "info" "Instalando GRUB para BIOS..."
+        arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm grub
+        arch-chroot "$AI_MOUNTPOINT" grub-install --target=i386-pc "$AI_TARGET"
+    fi
+    
+    # Generar configuración GRUB
+    arch-chroot "$AI_MOUNTPOINT" grub-mkconfig -o /boot/grub/grub.cfg
+    
+    print_msg "success" "Bootloader instalado"
+}
+
+# Función para instalar drivers de GPU
+install_gpu_drivers() {
+    print_msg "step" "Instalando drivers de GPU"
+    
+    case "$AI_GPU_DRIVER" in
+        "nvidia")
+            print_msg "info" "Instalando drivers NVIDIA..."
+            arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm "${AI_NVIDIA_DRIVERS[@]}"
+            ;;
+        "nvidia-lts")
+            print_msg "info" "Instalando drivers NVIDIA LTS..."
+            arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm "${AI_NVIDIA_LTS_DRIVERS[@]}"
+            ;;
+        "amd")
+            print_msg "info" "Instalando drivers AMD..."
+            arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm "${AI_AMD_DRIVERS[@]}"
+            ;;
+        "intel")
+            print_msg "info" "Instalando drivers Intel..."
+            arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm "${AI_INTEL_DRIVERS[@]}"
+            ;;
+        "vmware")
+            print_msg "info" "Instalando drivers VMware..."
+            arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm "${AI_VMWARE_DRIVERS[@]}"
+            ;;
+        "virtualbox")
+            print_msg "info" "Instalando drivers VirtualBox..."
+            arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm "${AI_VIRTUALBOX_DRIVERS[@]}"
+            ;;
+        *)
+            print_msg "warning" "Usando drivers por defecto (modesetting)"
+            ;;
+    esac
+    
+    print_msg "success" "Drivers de GPU instalados"
+}
+
+# Función para instalar entorno de escritorio
+install_desktop() {
+    print_msg "step" "Instalando entorno de escritorio"
+    
+    case "$AI_DESKTOP_ENV" in
+        "plasma-minimal")
+            print_msg "info" "Instalando Plasma mínimo..."
+            arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm xorg xorg-server "${AI_PLASMA_PACKAGES[@]}"
+            arch-chroot "$AI_MOUNTPOINT" systemctl enable sddm
+            ;;
+        "xfce")
+            print_msg "info" "Instalando XFCE..."
+            arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm xorg xorg-server "${AI_XFCE_PACKAGES[@]}"
+            arch-chroot "$AI_MOUNTPOINT" systemctl enable lightdm
+            ;;
+        "gnome")
+            print_msg "info" "Instalando GNOME..."
+            arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm xorg xorg-server "${AI_GNOME_PACKAGES[@]}"
+            arch-chroot "$AI_MOUNTPOINT" systemctl enable gdm
+            ;;
+        "none")
+            print_msg "info" "Saltando instalación de entorno gráfico"
+            return
+            ;;
+        *)
+            print_msg "error" "Entorno de escritorio no reconocido: $AI_DESKTOP_ENV"
+            return 1
+            ;;
+    esac
+    
+    print_msg "success" "Entorno de escritorio instalado"
+}
+
+# Función para instalar paquetes extra
+install_extras() {
+    if [ "$AI_INSTALL_EXTRA" != true ]; then
+        return
+    fi
+    
+    print_msg "step" "Instalando paquetes extra"
+    
+    print_msg "info" "Instalando paquetes recomendados..."
+    arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm "${AI_EXTRA_PACKAGES[@]}"
+    
+    # Instalar AUR helper (yay) si está habilitado
+    if [ "$AI_ENABLE_AUR" = true ]; then
+        print_msg "info" "Instalando yay (AUR helper)..."
         
         # Instalar dependencias
-        ai.changeroot_to_mountpoint pacman -S --needed --noconfirm git base-devel
+        arch-chroot "$AI_MOUNTPOINT" pacman -S --noconfirm git base-devel
         
-        # Compilar e instalar yay
-        ai.changeroot_to_mountpoint su - aurhelper -c "
+        # Clonar y compilar yay
+        arch-chroot "$AI_MOUNTPOINT" sudo -u "$AI_USER_NAME" bash -c "
             cd /tmp
             git clone https://aur.archlinux.org/yay.git
             cd yay
             makepkg -si --noconfirm
+            cd ..
+            rm -rf yay
         "
-        
-        # Limpiar usuario temporal
-        ai.changeroot_to_mountpoint userdel -r aurhelper
     fi
-}
-
-alias ai.configure_users=ai_configure_users
-ai_configure_users() {
-    local -r __documentation__='
-        Configura usuarios y grupos.
-    '
-    # Configurar root
-    echo "root:${AI_PASSWORD}" | ai.changeroot_to_mountpoint chpasswd
     
-    # Crear usuarios
-    local user_name
-    for user_name in "${AI_USER_NAMES[@]}"; do
-        bl.logging.info "Creando usuario: $user_name"
-        
-        # Crear usuario con directorio home
-        ai.changeroot_to_mountpoint useradd -m -G wheel,audio,video,storage,optical -s /bin/bash "$user_name"
-        echo "$user_name:${AI_USER_PASSWORD}" | ai.changeroot_to_mountpoint chpasswd
-        
-        # Configurar sudo para el usuario
-        echo "$user_name ALL=(ALL) ALL" >> "${AI_MOUNTPOINT_PATH}/etc/sudoers.d/$user_name"
-        
-        # Crear directorios de usuario
-        ai.changeroot_to_mountpoint su - "$user_name" -c "xdg-user-dirs-update"
-    done
+    print_msg "success" "Paquetes extra instalados"
 }
 
-alias ai.optimize_system=ai_optimize_system
-ai_optimize_system() {
-    local -r __documentation__='
-        Aplica optimizaciones al sistema.
-    '
-    bl.logging.info "Aplicando optimizaciones..."
+# Función para configurar servicios
+configure_services() {
+    print_msg "step" "Configurando servicios"
+    
+    # Habilitar servicios básicos
+    arch-chroot "$AI_MOUNTPOINT" systemctl enable NetworkManager
+    arch-chroot "$AI_MOUNTPOINT" systemctl enable bluetooth
+    arch-chroot "$AI_MOUNTPOINT" systemctl enable cups
+    arch-chroot "$AI_MOUNTPOINT" systemctl enable avahi-daemon
+    
+    # Habilitar cron si está instalado
+    if arch-chroot "$AI_MOUNTPOINT" pacman -Q cronie >/dev/null 2>&1; then
+        arch-chroot "$AI_MOUNTPOINT" systemctl enable cronie
+    fi
+    
+    # Habilitar SSH si está instalado
+    if arch-chroot "$AI_MOUNTPOINT" pacman -Q openssh >/dev/null 2>&1; then
+        arch-chroot "$AI_MOUNTPOINT" systemctl enable sshd
+    fi
+    
+    print_msg "success" "Servicios configurados"
+}
+
+# Función para optimizar sistema
+optimize_system() {
+    print_msg "step" "Optimizando sistema"
     
     # Optimizar pacman
-    cat << 'EOF' >> "${AI_MOUNTPOINT_PATH}/etc/pacman.conf"
-# Optimizaciones
-ILoveCandy
-ParallelDownloads = 5
-Color
-EOF
+    print_msg "info" "Optimizando pacman..."
+    sed -i 's/^#Color/Color/' "$AI_MOUNTPOINT/etc/pacman.conf"
+    sed -i 's/^#ParallelDownloads/ParallelDownloads/' "$AI_MOUNTPOINT/etc/pacman.conf"
+    echo 'ILoveCandy' >> "$AI_MOUNTPOINT/etc/pacman.conf"
     
-    # Configurar mkinitcpio
-    if $AI_ENCRYPT; then
-        sed -i 's/^HOOKS=.*/HOOKS=(base systemd autodetect keyboard sd-vconsole modconf block sd-encrypt filesystems fsck)/' \
-            "${AI_MOUNTPOINT_PATH}/etc/mkinitcpio.conf"
+    # Configurar reflector
+    if command -v reflector >/dev/null; then
+        cat > "$AI_MOUNTPOINT/etc/xdg/reflector/reflector.conf" << EOF
+--save /etc/pacman.d/mirrorlist
+--country Spain
+--protocol https
+--latest 10
+--sort rate
+EOF
+        arch-chroot "$AI_MOUNTPOINT" systemctl enable reflector.timer
     fi
     
-    # Habilitar servicios
-    local service
-    for service in "${AI_NEEDED_SERVICES[@]}"; do
-        bl.logging.info "Habilitando servicio: $service"
-        ai.changeroot_to_mountpoint systemctl enable "$service"
-    done
+    # Configurar mkinitcpio para LUKS
+    if [ "$AI_ENCRYPT_DISK" = true ]; then
+        print_msg "info" "Configurando mkinitcpio para LUKS..."
+        sed -i 's/^HOOKS=(.*)/HOOKS=(base udev autodetect keyboard keymap consolefont modconf block encrypt filesystems fsck)/' \
+            "$AI_MOUNTPOINT/etc/mkinitcpio.conf"
+        arch-chroot "$AI_MOUNTPOINT" mkinitcpio -P
+    fi
+    
+    # Configurar xdg-user-dirs
+    arch-chroot "$AI_MOUNTPOINT" sudo -u "$AI_USER_NAME" xdg-user-dirs-update
+    
+    print_msg "success" "Optimizaciones aplicadas"
 }
 
-# Las funciones existentes del script original se mantienen...
-# [Todas las funciones originales del script se mantienen aquí]
-# ...
+# ============================================================================
+# FUNCIONES DE INTERFAZ
+# ============================================================================
 
-## endregion
+# Función para mostrar menú principal
+show_menu() {
+    clear
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║            INSTALADOR DE ARCH LINUX MEJORADO            ║"
+    echo "╠══════════════════════════════════════════════════════════╣"
+    echo "║ 1. Instalación automática (Plasma mínimo)               ║"
+    echo "║ 2. Instalación personalizada                            ║"
+    echo "║ 3. Ver configuración actual                             ║"
+    echo "║ 4. Configurar opciones manualmente                      ║"
+    echo "║ 5. Salir                                                ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    
+    read -r -p "Seleccione una opción [1-5]: " choice
+    
+    case "$choice" in
+        1)
+            auto_install
+            ;;
+        2)
+            custom_install
+            ;;
+        3)
+            show_config
+            show_menu
+            ;;
+        4)
+            configure_manually
+            ;;
+        5)
+            exit 0
+            ;;
+        *)
+            print_msg "error" "Opción inválida"
+            sleep 2
+            show_menu
+            ;;
+    esac
+}
 
-## region controller
-alias ai.main=ai_main
-ai_main() {
-    local -r __documentation__='
-        Función principal del script.
-    '
-    bl.exception.activate
-    ai.commandline_interface "$@"
+# Función para mostrar configuración actual
+show_config() {
+    clear
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║               CONFIGURACIÓN ACTUAL                       ║"
+    echo "╠══════════════════════════════════════════════════════════╣"
+    echo "║ Hostname:          $AI_HOST_NAME"
+    echo "║ Usuario:           $AI_USER_NAME"
+    echo "║ Dispositivo:       $AI_TARGET"
+    echo "║ Zona horaria:      $AI_TIMEZONE"
+    echo "║ Locale:            $AI_LOCALE"
+    echo "║ Teclado:           $AI_KEYMAP"
+    echo "║ Entorno:           $AI_DESKTOP_ENV"
+    echo "║ Drivers GPU:       $AI_GPU_DRIVER"
+    echo "║ Cifrado:           $AI_ENCRYPT_DISK"
+    echo "║ Swap:              ${AI_SWAP_SIZE}MB"
+    echo "║ AUR:               $AI_ENABLE_AUR"
+    echo "║ Paquetes extra:    $AI_INSTALL_EXTRA"
+    echo "╚══════════════════════════════════════════════════════════╝"
+    echo ""
+    read -r -p "Presione Enter para continuar..."
+}
+
+# Función para configurar manualmente
+configure_manually() {
+    clear
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║            CONFIGURACIÓN MANUAL                          ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
     
-    # Detectar hardware si es automático
-    if [ "$AI_VIDEO_DRIVER" = "auto" ]; then
-        ai.detect_hardware
+    # Hostname
+    read -r -p "Hostname [$AI_HOST_NAME]: " input
+    AI_HOST_NAME="${input:-$AI_HOST_NAME}"
+    
+    # Usuario
+    read -r -p "Usuario [$AI_USER_NAME]: " input
+    AI_USER_NAME="${input:-$AI_USER_NAME}"
+    
+    # Contraseña de usuario
+    read -r -sp "Contraseña de usuario [*****]: " input
+    echo
+    if [ -n "$input" ]; then
+        AI_USER_PASSWORD="$input"
     fi
     
-    # Configurar paquetes a instalar
-    AI_PACKAGES+=(
-        "${AI_BASIC_PACKAGES[@]}"
-        "${AI_ADDITIONAL_PACKAGES[@]}"
-    )
-    
-    if $AI_ADD_COMMON_ADDITIONAL_PACKAGES; then
-        AI_PACKAGES+=("${AI_COMMON_ADDITIONAL_PACKAGES[@]}")
+    # Contraseña root
+    read -r -sp "Contraseña root [*****]: " input
+    echo
+    if [ -n "$input" ]; then
+        AI_ROOT_PASSWORD="$input"
     fi
     
-    # Preparar target
-    if [ ! -e "$AI_TARGET" ]; then
-        mkdir --parents "$AI_TARGET"
-    fi
+    # Dispositivo
+    echo ""
+    echo "Dispositivos disponibles:"
+    lsblk -d -o NAME,SIZE,TYPE,MODEL | grep -v "loop"
+    read -r -p "Dispositivo [$AI_TARGET]: " input
+    AI_TARGET="${input:-$AI_TARGET}"
     
-    if [ -d "$AI_TARGET" ]; then
-        AI_MOUNTPOINT_PATH="$AI_TARGET"
-        if [[ ! "$AI_MOUNTPOINT_PATH" =~ .*/$ ]]; then
-            AI_MOUNTPOINT_PATH+=/
+    # Entorno de escritorio
+    echo ""
+    echo "Entornos disponibles:"
+    echo "1) Ninguno (solo CLI)"
+    echo "2) Plasma mínimo (KDE)"
+    echo "3) XFCE"
+    echo "4) GNOME"
+    read -r -p "Entorno [2]: " input
+    case "${input:-2}" in
+        1) AI_DESKTOP_ENV="none" ;;
+        2) AI_DESKTOP_ENV="plasma-minimal" ;;
+        3) AI_DESKTOP_ENV="xfce" ;;
+        4) AI_DESKTOP_ENV="gnome" ;;
+        *) AI_DESKTOP_ENV="plasma-minimal" ;;
+    esac
+    
+    # Cifrado
+    read -r -p "¿Cifrar disco? [s/N]: " input
+    if [[ "$input" =~ ^[Ss]$ ]]; then
+        AI_ENCRYPT_DISK=true
+        read -r -sp "Contraseña de cifrado [*****]: " input
+        echo
+        if [ -n "$input" ]; then
+            AI_LUKS_PASSWORD="$input"
         fi
-    elif [ -b "$AI_TARGET" ]; then
-        ai.prepare_blockdevices
-        
-        bl.exception.try
-        {
-            if $AI_SYSTEM_PARTITION_INSTALLATION_ONLY; then
-                ai.format_system_partition
-            else
-                if $AI_AUTO_PARTITIONING; then
-                    bl.logging.info "Creando particiones automáticamente..."
-                    ai.make_partitions
-                    ai.format_partitions
-                else
-                    bl.logging.info "Esperando configuración manual de particiones..."
-                    ai.make_partitions
-                fi
-            fi
-        }
-        bl.exception.catch_single
-        {
-            ai.prepare_blockdevices
-            bl.logging.error_exception "$BL_EXCEPTION_LAST_TRACEBACK"
-        }
     else
-        bl.logging.error_exception "No se puede instalar en: $AI_TARGET"
+        AI_ENCRYPT_DISK=false
     fi
     
-    # Preparar instalación
-    ai.prepare_installation
-    
-    # Cargar cache si existe
-    bl.exception.try
-        ai.load_cache
-    bl.exception.catch_single
-        bl.logging.info "No hay cache de paquetes disponible."
-    
-    # Instalar sistema
-    if (( UID == 0 )) && ! $AI_PREVENT_USING_EXISTING_PACMAN && \
-        hash pacman 2>/dev/null; then
-        ai.with_existing_pacman
+    # AUR
+    read -r -p "¿Habilitar AUR (yay)? [S/n]: " input
+    if [[ "$input" =~ ^[Nn]$ ]]; then
+        AI_ENABLE_AUR=false
     else
-        ai.generic_linux_steps
+        AI_ENABLE_AUR=true
     fi
     
-    local -ir return_code=$?
-    
-    # Cachear paquetes descargados
-    bl.exception.try
-        ai.cache
-    bl.exception.catch_single
-        bl.logging.warn "No se pudo cachear los paquetes."
-    
-    # Configuraciones adicionales
-    if (( return_code == 0 )); then
-        ai.configure_pacman
-        ai.configure_locale
-        ai.configure_users
-        ai.setup_swap
-        ai.install_drivers
-        ai.install_desktop_environment
-        ai.install_aur_helper
-        ai.optimize_system
-        ai.configure
+    # Paquetes extra
+    read -r -p "¿Instalar paquetes extra? [S/n]: " input
+    if [[ "$input" =~ ^[Nn]$ ]]; then
+        AI_INSTALL_EXTRA=false
+    else
+        AI_INSTALL_EXTRA=true
     fi
+    
+    show_menu
+}
+
+# Función para instalación automática
+auto_install() {
+    print_msg "step" "INICIANDO INSTALACIÓN AUTOMÁTICA"
+    
+    # Configuración automática
+    AI_DESKTOP_ENV="plasma-minimal"
+    AI_ENABLE_AUR=true
+    AI_INSTALL_EXTRA=true
+    
+    if confirm "¿Continuar con la instalación automática?"; then
+        main_install
+    else
+        show_menu
+    fi
+}
+
+# Función para instalación personalizada
+custom_install() {
+    print_msg "step" "INICIANDO INSTALACIÓN PERSONALIZADA"
+    
+    if confirm "¿Continuar con la instalación personalizada?"; then
+        main_install
+    else
+        show_menu
+    fi
+}
+
+# ============================================================================
+# FUNCIÓN PRINCIPAL DE INSTALACIÓN
+# ============================================================================
+
+# Función principal de instalación
+main_install() {
+    print_msg "step" "INICIANDO INSTALACIÓN COMPLETA"
+    
+    # Mostrar configuración
+    show_config
+    
+    if ! confirm "¿Desea continuar con esta configuración?"; then
+        show_menu
+        return
+    fi
+    
+    # Verificar requisitos
+    check_internet || exit 1
+    
+    # Detectar hardware
+    detect_hardware
+    
+    # Seleccionar dispositivo
+    select_device
+    
+    # Particionar disco
+    if [ "$AI_AUTO_PARTITION" = true ]; then
+        partition_disk || exit 1
+    fi
+    
+    # Formatear particiones
+    format_partitions || exit 1
+    
+    # Configurar mirrors
+    configure_mirrors || exit 1
+    
+    # Instalar sistema base
+    install_base || exit 1
+    
+    # Configurar sistema
+    configure_system || exit 1
+    
+    # Instalar bootloader
+    install_bootloader || exit 1
+    
+    # Instalar drivers de GPU
+    install_gpu_drivers || exit 1
+    
+    # Instalar entorno de escritorio
+    install_desktop || exit 1
+    
+    # Instalar paquetes extra
+    install_extras || exit 1
+    
+    # Configurar servicios
+    configure_services || exit 1
+    
+    # Optimizar sistema
+    optimize_system || exit 1
     
     # Finalizar
-    ai.tidy_up_system
-    ai.prepare_next_boot
-    ai.pack_result
+    print_msg "success" "INSTALACIÓN COMPLETADA EXITOSAMENTE"
     
-    bl.logging.info "✅ Instalación completada en: $AI_TARGET"
-    bl.logging.info "   Hostname: $AI_HOST_NAME"
-    bl.logging.info "   Usuarios: ${AI_USER_NAMES[*]}"
-    bl.logging.info "   Entorno: $AI_DESKTOP_ENVIRONMENT"
+    # Mostrar resumen
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════╗"
+    echo "║                 INSTALACIÓN COMPLETADA                   ║"
+    echo "╠══════════════════════════════════════════════════════════╣"
+    echo "║ Hostname:          $AI_HOST_NAME                        ║"
+    echo "║ Usuario:           $AI_USER_NAME                        ║"
+    echo "║ Contraseña:        $AI_USER_PASSWORD                    ║"
+    echo "║ Entorno:           $AI_DESKTOP_ENV                      ║"
+    echo "║ Drivers:           $AI_GPU_DRIVER                       ║"
+    echo "║ Cifrado:           $AI_ENCRYPT_DISK                     ║"
+    echo "║                                                    ║"
+    echo "║ Próximos pasos:                                         ║"
+    echo "║ 1. Reiniciar el sistema                                 ║"
+    echo "║ 2. Iniciar sesión con su usuario                       ║"
+    echo "║ 3. Configurar su entorno                                ║"
+    echo "╚══════════════════════════════════════════════════════════╝"
     
-    if $AI_AUTOMATIC_REBOOT; then
-        bl.logging.info "🔄 Reiniciando en 5 segundos..."
-        sleep 5
+    if confirm "¿Desea reiniciar ahora?"; then
+        umount -R "$AI_MOUNTPOINT"
         reboot
     fi
-    
-    bl.exception.deactivate
 }
-## endregion
-# endregion
 
-if bl.tools.is_main; then
-    ai.main "$@"
+# ============================================================================
+# PUNTO DE ENTRADA
+# ============================================================================
+
+# Verificar si se ejecuta como root
+if [ "$EUID" -ne 0 ]; then
+    print_msg "error" "Este script debe ejecutarse como root"
+    print_msg "info" "Por favor, ejecute: sudo bash $0"
+    exit 1
 fi
 
-# region vim modline
-# vim: set tabstop=4 shiftwidth=4 expandtab:
-# vim: foldmethod=marker foldmarker=region,endregion:
-# endregion
+# Verificar que estamos en Arch ISO
+if [ ! -f "/etc/arch-release" ]; then
+    print_msg "warning" "Parece que no está en la ISO de Arch Linux"
+    if ! confirm "¿Continuar de todas formas?"; then
+        exit 1
+    fi
+fi
+
+# Parsear argumentos de línea de comandos
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --hostname)
+            AI_HOST_NAME="$2"
+            shift 2
+            ;;
+        --user)
+            AI_USER_NAME="$2"
+            shift 2
+            ;;
+        --password)
+            AI_USER_PASSWORD="$2"
+            shift 2
+            ;;
+        --target)
+            AI_TARGET="$2"
+            shift 2
+            ;;
+        --desktop)
+            AI_DESKTOP_ENV="$2"
+            shift 2
+            ;;
+        --encrypt)
+            AI_ENCRYPT_DISK=true
+            shift
+            ;;
+        --skip-confirm)
+            AI_SKIP_CONFIRM=true
+            shift
+            ;;
+        --auto)
+            AI_SKIP_CONFIRM=true
+            AI_AUTO_PARTITION=true
+            shift
+            ;;
+        --help)
+            echo "Uso: $0 [OPCIONES]"
+            echo ""
+            echo "Opciones:"
+            echo "  --hostname NOMBRE      Establecer hostname"
+            echo "  --user USUARIO         Establecer nombre de usuario"
+            echo "  --password CONTRASEÑA  Establecer contraseña de usuario"
+            echo "  --target DISPOSITIVO   Dispositivo de instalación (ej: /dev/sda)"
+            echo "  --desktop ENTORNO      Entorno de escritorio (plasma-minimal, xfce, gnome, none)"
+            echo "  --encrypt              Cifrar disco con LUKS"
+            echo "  --skip-confirm         Saltar confirmaciones"
+            echo "  --auto                 Instalación completamente automática"
+            echo "  --help                 Mostrar esta ayuda"
+            echo ""
+            echo "Ejemplos:"
+            echo "  $0 --auto"
+            echo "  $0 --target /dev/sda --desktop plasma-minimal --encrypt"
+            exit 0
+            ;;
+        *)
+            print_msg "error" "Argumento desconocido: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# Iniciar menú o instalación automática
+if [ "$AI_SKIP_CONFIRM" = true ] && [ "$AI_AUTO_PARTITION" = true ]; then
+    print_msg "info" "Iniciando instalación automática..."
+    main_install
+else
+    show_menu
+fi
