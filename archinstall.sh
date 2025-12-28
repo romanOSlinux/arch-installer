@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Arch Linux Installer - KDE Plasma Argentina
-# Script corregido: Se eliminó reiserfsprogs (obsoleto) y corregido mount UEFI
+# Arch Linux Installer - KDE Plasma Argentina (Minimal)
+# Script mejorado con correcciones de seguridad y robustez
 # Licencia: MIT
 
 set -euo pipefail
@@ -30,13 +30,12 @@ readonly BACKUP_MIRRORS=(
     "https://mirror.leaseweb.com/archlinux/\$repo/os/\$arch"
     "https://mirror.rackspace.com/archlinux/\$repo/os/\$arch"
     "https://mirror.lty.me/archlinux/\$repo/os/\$arch"
-    "http://mirror.rackspace.com/archlinux/\$repo/os/\$arch"
     "https://archlinux.mailtunnel.eu/\$repo/os/\$arch"
     "https://mirror.puzzle.ch/archlinux/\$repo/os/\$arch"
     "https://mirror.selfnet.de/archlinux/\$repo/os/\$arch"
 )
 
-# Paquetes base (CORREGIDO: Eliminado reiserfsprogs)
+# Paquetes base (optimizados)
 readonly BASE_PACKAGES=(
     base base-devel linux linux-firmware linux-headers
     btrfs-progs sudo nano vim bash-completion
@@ -47,11 +46,10 @@ readonly BASE_PACKAGES=(
     xfsprogs jfsutils ntfs-3g exfatprogs
 )
 
-# Paquetes KDE Plasma mínimo
-readonly KDE_PACKAGES=(
-    plasma-meta
+# Paquetes KDE Plasma MÍNIMO (reducido)
+readonly KDE_MINIMAL=(
+    plasma-desktop
     plasma-wayland-session
-    kde-applications-meta
     sddm
     dolphin
     konsole
@@ -59,26 +57,28 @@ readonly KDE_PACKAGES=(
     spectacle
     gwenview
     ark
-    kcalc
-    print-manager
-    sddm-kcm
     kde-gtk-config
     breeze-gtk
     xdg-desktop-portal-kde
     xdg-utils
     pipewire pipewire-pulse pipewire-alsa wireplumber
     phonon-qt5-gstreamer
-    xorg-server # Necesario para compatibilidad
+    xorg-server
     xorg-xinit
+    plasma-nm
+    powerdevil
+    bluedevil
+    kscreen
+    print-manager
 )
 
-# Utilidades adicionales
+# Utilidades básicas (reducido)
 readonly UTILITIES=(
     firefox
-    htop btop
+    htop
     neofetch
     gparted
-    libreoffice-still
+    libreoffice-fresh
     vlc
     gimp
     cups
@@ -90,20 +90,13 @@ readonly UTILITIES=(
     noto-fonts
     noto-fonts-cjk
     noto-fonts-emoji
-    ttf-roboto
     papirus-icon-theme
     breeze-icons
-    arc-gtk-theme
-    mate-terminal
-    gnome-disk-utility
     gvfs gvfs-mtp gvfs-smb
     ntfs-3g
-    exfat-utils
+    exfatprogs
     unrar unzip p7zip
     rsync
-    wget
-    curl
-    openssh
     reflector
 )
 
@@ -152,7 +145,7 @@ print_fail() {
 }
 
 # ============================================================================
-# FUNCIONES DE DETECCIÓN
+# FUNCIONES DE DETECCIÓN MEJORADAS
 # ============================================================================
 
 detect_boot_mode() {
@@ -174,12 +167,17 @@ detect_cpu() {
 }
 
 detect_gpu() {
-    if lspci | grep -qi "nvidia"; then
+    local gpu_info
+    gpu_info=$(lspci 2>/dev/null | grep -E "VGA|3D|Display" || echo "")
+    
+    if echo "$gpu_info" | grep -qi "nvidia"; then
         echo "nvidia"
-    elif lspci | grep -qi "amd" | grep -qi "radeon"; then
+    elif echo "$gpu_info" | grep -qi "amd" && echo "$gpu_info" | grep -qi "radeon"; then
         echo "amd"
-    elif lspci | grep -qi "intel" | grep -qi "graphics"; then
+    elif echo "$gpu_info" | grep -qi "intel" || echo "$gpu_info" | grep -qi "integrated graphics"; then
         echo "intel"
+    elif echo "$gpu_info" | grep -qi "vmware\|virtualbox\|qxl\|virtio"; then
+        echo "virtual"
     else
         echo "unknown"
     fi
@@ -192,7 +190,7 @@ get_ram_size() {
 }
 
 # ============================================================================
-# FUNCIONES DE VALIDACIÓN
+# FUNCIONES DE VALIDACIÓN MEJORADAS
 # ============================================================================
 
 check_root() {
@@ -238,6 +236,64 @@ validate_disk() {
         return 1
     fi
 
+    # Verificar que no sea el disco del sistema de instalación
+    local install_root=$(mount | grep ' / ' | cut -d' ' -f1 | sed 's/[0-9]*$//')
+    if [[ "$disk" == "$install_root" ]]; then
+        print_err "No puede seleccionar el disco del sistema de instalación"
+        return 1
+    fi
+
+    return 0
+}
+
+validate_username() {
+    local username=$1
+    
+    # Validar caracteres permitidos (solo minúsculas, números, guiones y guiones bajos)
+    if [[ ! "$username" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+        print_err "Nombre de usuario inválido. Solo minúsculas, números, '-' y '_'"
+        return 1
+    fi
+    
+    # Validar longitud
+    if [[ ${#username} -lt 2 ]] || [[ ${#username} -gt 32 ]]; then
+        print_err "El nombre de usuario debe tener entre 2 y 32 caracteres"
+        return 1
+    fi
+    
+    # Validar nombres reservados
+    local reserved_users=("root" "bin" "daemon" "mail" "ftp" "http" "nobody" "dbus" "systemd")
+    for reserved in "${reserved_users[@]}"; do
+        if [[ "$username" == "$reserved" ]]; then
+            print_err "Nombre de usuario reservado: $username"
+            return 1
+        fi
+    done
+    
+    return 0
+}
+
+validate_hostname() {
+    local hostname=$1
+    
+    # Validar longitud
+    if [[ ${#hostname} -lt 2 ]] || [[ ${#hostname} -gt 63 ]]; then
+        print_err "El hostname debe tener entre 2 y 63 caracteres"
+        return 1
+    fi
+    
+    # Validar caracteres
+    if [[ ! "$hostname" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]$ ]]; then
+        print_err "Hostname inválido. Solo letras, números y guiones"
+        return 1
+    fi
+    
+    # No puede empezar ni terminar con guión
+    if [[ "$hostname" == -* ]] || [[ "$hostname" == *- ]]; then
+        print_err "El hostname no puede empezar ni terminar con guión"
+        return 1
+    fi
+    
     return 0
 }
 
@@ -264,7 +320,6 @@ configure_mirrors() {
         "https://archlinux.org/mirrorlist/?country=AR&protocol=https&ip_version=4&use_mirror_status=on"
         "https://archlinux.org/mirrorlist/?country=AR&protocol=http&ip_version=4&use_mirror_status=on"
         "https://archlinux.org/mirrorlist/?country=AR&use_mirror_status=on"
-        "https://raw.githubusercontent.com/archlinux/archweb/master/mirrors/status.json"
     )
 
     for url in "${mirror_urls[@]}"; do
@@ -342,7 +397,6 @@ Server = http://mirrors.nic.ar/archlinux/$repo/os/$arch
 Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch
 Server = https://mirror.rackspace.com/archlinux/$repo/os/$arch
 Server = https://mirror.lty.me/archlinux/$repo/os/$arch
-Server = http://mirror.rackspace.com/archlinux/$repo/os/$arch
 Server = https://archlinux.mailtunnel.eu/$repo/os/$arch
 Server = https://mirror.puzzle.ch/archlinux/$repo/os/$arch
 Server = https://mirror.selfnet.de/archlinux/$repo/os/$arch
@@ -415,7 +469,7 @@ configure_pacman_options() {
 }
 
 # ============================================================================
-# FUNCIONES DE PARTICIONADO
+# FUNCIONES DE PARTICIONADO MEJORADAS
 # ============================================================================
 
 partition_uefi() {
@@ -431,7 +485,7 @@ partition_uefi() {
     print_substep "Creando tabla GPT..."
     parted -s "$disk" mklabel gpt
 
-    # Partición EFI (600MB - Aumentada para alojar kernels dentro de /boot)
+    # Partición EFI (600MB)
     print_substep "Creando partición EFI (600MB)..."
     parted -s "$disk" mkpart "EFI" fat32 1MiB 601MiB
     parted -s "$disk" set 1 esp on
@@ -579,7 +633,7 @@ create_btrfs_subvolumes() {
 
     # Montar subvolumen raíz con opciones optimizadas
     print_substep "Montando subvolumen raíz..."
-    mount -o noatime,compress=zstd,space_cache=v2,subvol=@ "$root_part" /mnt
+    mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@ "$root_part" /mnt
 
     # Crear directorios para otros subvolúmenes
     print_substep "Creando estructura de directorios..."
@@ -587,21 +641,21 @@ create_btrfs_subvolumes() {
 
     # Montar otros subvolúmenes
     print_substep "Montando subvolúmenes..."
-    mount -o noatime,compress=zstd,space_cache=v2,subvol=@home "$root_part" /mnt/home
-    mount -o noatime,compress=zstd,space_cache=v2,subvol=@var "$root_part" /mnt/var
-    mount -o noatime,compress=zstd,space_cache=v2,subvol=@tmp "$root_part" /mnt/tmp
-    mount -o noatime,compress=zstd,space_cache=v2,subvol=@snapshots "$root_part" /mnt/.snapshots
+    mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@home "$root_part" /mnt/home
+    mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@var "$root_part" /mnt/var
+    mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@tmp "$root_part" /mnt/tmp
+    mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@snapshots "$root_part" /mnt/.snapshots
 
     # Directorios especiales
     mkdir -p /mnt/var/{cache,log}
-    mount -o noatime,compress=zstd,space_cache=v2,subvol=@cache "$root_part" /mnt/var/cache
-    mount -o noatime,compress=zstd,space_cache=v2,subvol=@log "$root_part" /mnt/var/log
+    mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@cache "$root_part" /mnt/var/cache
+    mount -o noatime,compress=zstd:3,space_cache=v2,subvol=@log "$root_part" /mnt/var/log
 
     print_success "Subvolúmenes BTRFS creados correctamente"
 }
 
 # ============================================================================
-# FUNCIONES DE INSTALACIÓN
+# FUNCIONES DE INSTALACIÓN MEJORADAS
 # ============================================================================
 
 install_base_system() {
@@ -676,13 +730,10 @@ generate_fstab() {
 
     # Optimizar opciones BTRFS en fstab
     sed -i 's/subvolid=[0-9]*,//g' /mnt/etc/fstab
-    sed -i 's|/dev/.* / btrfs|& noatime,compress=zstd,space_cache=v2,subvol=@|' /mnt/etc/fstab
-    sed -i 's|/dev/.* /home btrfs|& noatime,compress=zstd,space_cache=v2,subvol=@home|' /mnt/etc/fstab
-    sed -i 's|/dev/.* /var btrfs|& noatime,compress=zstd,space_cache=v2,subvol=@var|' /mnt/etc/fstab
-    sed -i 's|/dev/.* /tmp btrfs|& noatime,compress=zstd,space_cache=v2,subvol=@tmp|' /mnt/etc/fstab
-
-    # Nota: genfstab ya añadió la entrada de /boot (EFI o ext4), 
-    # no es necesaria lógica extra manual aquí.
+    sed -i 's|/dev/.* / btrfs|& noatime,compress=zstd:3,space_cache=v2,subvol=@|' /mnt/etc/fstab
+    sed -i 's|/dev/.* /home btrfs|& noatime,compress=zstd:3,space_cache=v2,subvol=@home|' /mnt/etc/fstab
+    sed -i 's|/dev/.* /var btrfs|& noatime,compress=zstd:3,space_cache=v2,subvol=@var|' /mnt/etc/fstab
+    sed -i 's|/dev/.* /tmp btrfs|& noatime,compress=zstd:3,space_cache=v2,subvol=@tmp|' /mnt/etc/fstab
 
     print_success "Fstab generado"
 }
@@ -745,7 +796,7 @@ setup_users() {
     if arch-chroot /mnt id "$USERNAME" &>/dev/null; then
         print_warn "El usuario '$USERNAME' ya existe"
     else
-        arch-chroot /mnt useradd -m -G wheel,audio,video,storage,optical -s /bin/bash "$USERNAME"
+        arch-chroot /mnt useradd -m -G wheel,audio,video,storage,optical,lp -s /bin/bash "$USERNAME"
     fi
 
     if [[ -n "$USER_PASSWORD" ]]; then
@@ -755,10 +806,19 @@ setup_users() {
         print_warn "Se pedirá la contraseña para '$USERNAME' manualmente después del reinicio"
     fi
 
-    # Configurar sudoers
+    # Configurar sudoers de forma segura
     print_substep "Configurando sudo..."
-    echo "%wheel ALL=(ALL) ALL" >> /mnt/etc/sudoers
-    echo "%wheel ALL=(ALL) NOPASSWD: /usr/bin/pacman" >> /mnt/etc/sudoers
+    
+    # Backup del sudoers original
+    cp /mnt/etc/sudoers /mnt/etc/sudoers.backup
+    
+    # Añadir configuración wheel correctamente
+    cat >> /mnt/etc/sudoers.d/10-wheel << 'EOF'
+%wheel ALL=(ALL:ALL) ALL
+%wheel ALL=(ALL) NOPASSWD: /usr/bin/pacman
+EOF
+    
+    chmod 440 /mnt/etc/sudoers.d/10-wheel
 
     # Configurar entorno por defecto para el usuario
     arch-chroot /mnt mkdir -p /home/"$USERNAME"/.config
@@ -767,8 +827,8 @@ setup_users() {
     print_success "Usuarios configurados"
 }
 
-install_kde_plasma() {
-    print_step "Instalando KDE Plasma"
+install_kde_plasma_minimal() {
+    print_step "Instalando KDE Plasma Mínimo"
 
     print_substep "Instalando KDE Plasma (esto puede tomar varios minutos)..."
 
@@ -777,7 +837,7 @@ install_kde_plasma() {
     local install_success=false
 
     while [[ $retry_count -lt $max_retries ]] && [[ $install_success == false ]]; do
-        if arch-chroot /mnt pacman -S --noconfirm --needed "${KDE_PACKAGES[@]}" 2>&1 | tee /tmp/kde_install.log; then
+        if arch-chroot /mnt pacman -S --noconfirm --needed "${KDE_MINIMAL[@]}" 2>&1 | tee /tmp/kde_install.log; then
             install_success=true
         else
             retry_count=$((retry_count + 1))
@@ -798,7 +858,15 @@ install_kde_plasma() {
 Current=breeze
 EOF
 
-        print_success "KDE Plasma instalado"
+        # Configurar autologin opcional (comentado por defecto)
+        cat >> /mnt/etc/sddm.conf << EOF
+
+[Autologin]
+#User=$USERNAME
+#Session=plasma
+EOF
+
+        print_success "KDE Plasma Mínimo instalado"
     else
         print_warn "Hubo problemas instalando KDE Plasma, continuando..."
     fi
@@ -819,22 +887,26 @@ install_drivers() {
     case "$gpu_type" in
         nvidia)
             print_substep "Instalando drivers NVIDIA..."
-            arch-chroot /mnt pacman -S --noconfirm --needed nvidia nvidia-utils nvidia-settings 2>/dev/null || {
+            arch-chroot /mnt pacman -S --noconfirm --needed nvidia nvidia-utils nvidia-settings nvidia-prime 2>/dev/null || {
                 print_warn "No se pudieron instalar drivers NVIDIA, continuando..."
             }
             echo "options nvidia-drm modeset=1" >> /mnt/etc/modprobe.d/nvidia.conf 2>/dev/null || true
             ;;
         amd)
             print_substep "Instalando drivers AMD..."
-            arch-chroot /mnt pacman -S --noconfirm --needed xf86-video-amdgpu 2>/dev/null || {
+            arch-chroot /mnt pacman -S --noconfirm --needed xf86-video-amdgpu vulkan-radeon 2>/dev/null || {
                 print_warn "No se pudieron instalar drivers AMD, continuando..."
             }
             ;;
         intel)
             print_substep "Instalando drivers Intel..."
-            arch-chroot /mnt pacman -S --noconfirm --needed xf86-video-intel 2>/dev/null || {
+            arch-chroot /mnt pacman -S --noconfirm --needed xf86-video-intel vulkan-intel intel-media-driver 2>/dev/null || {
                 print_warn "No se pudieron instalar drivers Intel, continuando..."
             }
+            ;;
+        virtual)
+            print_substep "Instalando drivers para máquina virtual..."
+            arch-chroot /mnt pacman -S --noconfirm --needed xf86-video-vmware xf86-video-qxl xf86-video-vboxvideo 2>/dev/null || true
             ;;
         *)
             print_substep "GPU desconocida, instalando drivers genéricos..."
@@ -873,6 +945,34 @@ EOF
     print_success "ZRAM configurado (${zram_size}MB)"
 }
 
+setup_disk_swap() {
+    local ram_mb
+    ram_mb=$(get_ram_size)
+    
+    # Si la RAM es menor a 4GB, crear swap en disco de 2GB
+    if [[ $ram_mb -lt 4000 ]]; then
+        print_step "Creando swap en disco (2GB) por tener poca RAM"
+        
+        # Crear archivo de swap
+        arch-chroot /mnt fallocate -l 2G /swapfile 2>/dev/null || \
+            arch-chroot /mnt dd if=/dev/zero of=/swapfile bs=1M count=2048 status=progress 2>/dev/null
+        
+        arch-chroot /mnt chmod 600 /swapfile
+        arch-chroot /mnt mkswap /swapfile
+        arch-chroot /mnt swapon /swapfile 2>/dev/null || true
+        
+        # Añadir al fstab
+        echo '/swapfile none swap defaults 0 0' >> /mnt/etc/fstab
+        
+        # Configurar swappiness
+        echo "vm.swappiness=60" >> /mnt/etc/sysctl.d/99-swap.conf 2>/dev/null || true
+        
+        print_success "Swap en disco creado (2GB)"
+    else
+        print_substep "No se requiere swap en disco (RAM suficiente: ${ram_mb}MB)"
+    fi
+}
+
 install_bootloader() {
     print_step "Instalando gestor de arranque"
 
@@ -883,7 +983,7 @@ install_bootloader() {
         # systemd-boot para UEFI
         print_substep "Instalando systemd-boot..."
 
-        # Instalar systemd-boot. Nota: /mnt/boot está montado con la partición EFI.
+        # Instalar systemd-boot
         arch-chroot /mnt bootctl install 2>/dev/null || {
             print_warn "Intentando método alternativo de instalación..."
             arch-chroot /mnt bootctl install --path=/boot 2>/dev/null || true
@@ -943,7 +1043,7 @@ EOF
         }
 
         # Instalar GRUB en el disco
-        arch-chroot /mnt grub-install --target=i386-pc "$TARGET_DISK" 2>/dev/null || {
+        arch-chroot /mnt grub-install --target=i386-pc --recheck "$TARGET_DISK" 2>/dev/null || {
             print_warn "Error instalando GRUB, intentando continuar..."
         }
 
@@ -979,26 +1079,30 @@ EOF
 }
 
 install_utilities() {
-    print_step "Instalando utilidades adicionales"
+    print_step "Instalando utilidades básicas"
 
     print_substep "Instalando utilidades (esto puede tomar tiempo)..."
 
-    # Instalar utilidades en grupos para manejar mejor los fallos
+    # Instalar utilidades en grupos más pequeños
     local utility_groups=(
-        "${UTILITIES[@]:0:10}"
-        "${UTILITIES[@]:10:10}"
-        "${UTILITIES[@]:20}"
+        "firefox htop neofetch"
+        "gparted libreoffice-fresh vlc"
+        "gimp cups hplip"
+        "ghostscript gsfonts ttf-dejavu ttf-liberation"
+        "noto-fonts noto-fonts-cjk noto-fonts-emoji"
+        "papirus-icon-theme breeze-icons"
+        "gvfs gvfs-mtp gvfs-smb ntfs-3g exfatprogs"
+        "unrar unzip p7zip rsync reflector"
     )
 
     local group_num=1
     for group in "${utility_groups[@]}"; do
-        if [[ -n "$group" ]]; then
-            print_substep "Instalando grupo $group_num de utilidades..."
-            if ! arch-chroot /mnt pacman -S --noconfirm --needed $group 2>/dev/null; then
-                print_warn "Algunas utilidades del grupo $group_num no se pudieron instalar"
-            fi
-            group_num=$((group_num + 1))
+        print_substep "Instalando grupo $group_num de utilidades..."
+        if ! arch-chroot /mnt pacman -S --noconfirm --needed $group 2>/dev/null; then
+            print_warn "Algunas utilidades del grupo $group_num no se pudieron instalar"
         fi
+        group_num=$((group_num + 1))
+        sleep 1
     done
 
     # Habilitar servicios
@@ -1006,7 +1110,10 @@ install_utilities() {
     arch-chroot /mnt systemctl enable bluetooth.service 2>/dev/null || true
 
     # Instalar y habilitar reflector para mantener mirrors actualizados
-    arch-chroot /mnt pacman -S --noconfirm --needed reflector 2>/dev/null || true
+    if ! arch-chroot /mnt command -v reflector &>/dev/null; then
+        arch-chroot /mnt pacman -S --noconfirm --needed reflector 2>/dev/null || true
+    fi
+    
     if arch-chroot /mnt command -v reflector &>/dev/null; then
         cat > /mnt/etc/xdg/reflector/reflector.conf << EOF
 --country Argentina,Brazil,Chile,Uruguay,United States
@@ -1018,7 +1125,7 @@ EOF
         arch-chroot /mnt systemctl enable reflector.timer 2>/dev/null || true
     fi
 
-    print_success "Utilidades instaladas"
+    print_success "Utilidades básicas instaladas"
 }
 
 final_configuration() {
@@ -1045,28 +1152,34 @@ final_configuration() {
     print_substep "Optimizando journal..."
     sed -i 's/^#SystemMaxUse=/SystemMaxUse=500M/' /mnt/etc/systemd/journald.conf 2>/dev/null || true
 
-    # Configurar swappiness para ZRAM
-    echo "vm.swappiness=100" >> /mnt/etc/sysctl.d/99-sysctl.conf 2>/dev/null || true
-
     # Configurar límites de recursos
     cat > /mnt/etc/security/limits.conf 2>/dev/null << EOF
 * soft nofile 524288
 * hard nofile 1048576
 EOF
 
+    # Configurar política de suspensión
+    cat > /mnt/etc/systemd/sleep.conf 2>/dev/null << EOF
+[Sleep]
+AllowSuspend=yes
+AllowHibernation=no
+AllowSuspendThenHibernate=no
+AllowHybridSleep=no
+EOF
+
     print_success "Configuración final aplicada"
 }
 
 # ============================================================================
-# INTERFAZ DE USUARIO
+# INTERFAZ DE USUARIO MEJORADA
 # ============================================================================
 
 show_header() {
     clear
     echo -e "${BLUE}╔══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║${NC}     ${BOLD}Arch Linux Installer - KDE Plasma Argentina${NC}     ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}   ${BOLD}Arch Linux Installer - KDE Plasma Minimal Argentina${NC}   ${BLUE}║${NC}"
     echo -e "${BLUE}╠══════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${BLUE}║${NC}                 ${CYAN}Configuración automatizada${NC}                 ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}            ${CYAN}Configuración automatizada minimal${NC}            ${BLUE}║${NC}"
     echo -e "${BLUE}╚══════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
@@ -1090,10 +1203,10 @@ show_system_info() {
 show_disks() {
     print_substep "Discos disponibles:"
     echo -e "${DIM}"
-    lsblk -d -o NAME,SIZE,TYPE,MODEL | grep -E "^(NAME|disk)"
+    lsblk -d -o NAME,SIZE,TYPE,MODEL | grep -E "^(NAME|disk)" 2>/dev/null || true
     echo -e "${NC}"
     echo -e "${DIM}"
-    lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,LABEL
+    lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,LABEL 2>/dev/null
     echo -e "${NC}"
 }
 
@@ -1108,7 +1221,7 @@ interactive_setup() {
 
     # Solicitar disco de instalación
     while true; do
-        read -rp "Ingrese el disco para instalar (ej: /dev/sda): " TARGET_DISK
+        read -rp "Ingrese el disco para instalar (ej: /dev/sda, /dev/nvme0n1): " TARGET_DISK
 
         if validate_disk "$TARGET_DISK"; then
             break
@@ -1124,7 +1237,7 @@ interactive_setup() {
     echo ""
 
     read -rp "¿Continuar con la instalación? (s/N): " confirm
-    if [[ ! "$confirm" =~ ^[Ss]$ ]]; then
+    if [[ ! "$confirm" =~ ^[SsYy]$ ]]; then
         print_msg "Instalación cancelada por el usuario."
         exit 0
     fi
@@ -1133,11 +1246,28 @@ interactive_setup() {
     echo ""
     print_step "Configuración básica del sistema"
 
-    read -rp "Nombre del host [$HOSTNAME]: " input
-    [[ -n "$input" ]] && HOSTNAME="$input"
+    while true; do
+        read -rp "Nombre del host [$HOSTNAME]: " input
+        [[ -n "$input" ]] && HOSTNAME="$input"
+        
+        if validate_hostname "$HOSTNAME"; then
+            break
+        else
+            print_warn "Nombre de host inválido. Intente nuevamente."
+        fi
+    done
 
-    read -rp "Nombre de usuario [$USERNAME]: " input
-    [[ -n "$input" ]] && USERNAME="$input"
+    # Validación de nombre de usuario
+    while true; do
+        read -rp "Nombre de usuario [$USERNAME]: " input
+        [[ -n "$input" ]] && USERNAME="$input"
+        
+        if validate_username "$USERNAME"; then
+            break
+        else
+            print_warn "Nombre de usuario inválido. Intente nuevamente."
+        fi
+    done
 
     # Contraseñas
     echo ""
@@ -1147,6 +1277,10 @@ interactive_setup() {
         read -rsp "Contraseña para root (dejar vacío para saltar): " ROOT_PASSWORD
         echo
         if [[ -n "$ROOT_PASSWORD" ]]; then
+            if [[ ${#ROOT_PASSWORD} -lt 8 ]]; then
+                print_warn "La contraseña debe tener al menos 8 caracteres"
+                continue
+            fi
             read -rsp "Confirmar contraseña: " confirm_pass
             echo
             if [[ "$ROOT_PASSWORD" == "$confirm_pass" ]]; then
@@ -1164,6 +1298,10 @@ interactive_setup() {
         read -rsp "Contraseña para usuario '$USERNAME' (dejar vacío para saltar): " USER_PASSWORD
         echo
         if [[ -n "$USER_PASSWORD" ]]; then
+            if [[ ${#USER_PASSWORD} -lt 8 ]]; then
+                print_warn "La contraseña debe tener al menos 8 caracteres"
+                continue
+            fi
             read -rsp "Confirmar contraseña: " confirm_pass
             echo
             if [[ "$USER_PASSWORD" == "$confirm_pass" ]]; then
@@ -1183,6 +1321,8 @@ interactive_setup() {
     read -rp "Porcentaje de RAM para ZRAM [$SWAP_PERCENTAGE%] (10-200): " input
     if [[ -n "$input" ]] && [[ "$input" =~ ^[0-9]+$ ]] && [[ "$input" -ge 10 ]] && [[ "$input" -le 200 ]]; then
         SWAP_PERCENTAGE="$input"
+    else
+        print_warn "Valor inválido, usando por defecto: $SWAP_PERCENTAGE%"
     fi
 
     print_success "Configuración completada"
@@ -1242,7 +1382,7 @@ main() {
             exit 1
         fi
 
-        # Montaje UEFI CORREGIDO
+        # Montar partición EFI en /boot
         mkdir -p /mnt/boot
         mount "$efi_part" /mnt/boot 2>/dev/null || {
             print_err "No se pudo montar la partición EFI en /boot"
@@ -1283,8 +1423,8 @@ main() {
     configure_system
     setup_users
 
-    # Instalación de KDE Plasma
-    if ! install_kde_plasma; then
+    # Instalación de KDE Plasma Mínimo
+    if ! install_kde_plasma_minimal; then
         print_warn "Continuando sin KDE Plasma completo"
     fi
 
@@ -1294,13 +1434,16 @@ main() {
     # Configuración de ZRAM
     setup_zram
 
+    # Configuración de swap en disco si es necesario
+    setup_disk_swap
+
     # Instalación del bootloader
     if ! install_bootloader "$boot_mode" "$cpu_type"; then
         print_err "Error instalando el bootloader"
         exit 1
     fi
 
-    # Instalación de utilidades
+    # Instalación de utilidades básicas
     install_utilities
 
     # Configuración final
@@ -1320,7 +1463,7 @@ main() {
     echo -e "${GREEN}║${NC}  ${BOLD}Información del sistema instalado:${NC}                   ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}  • Hostname: ${BOLD}$HOSTNAME${NC}                                ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}  • Usuario: ${BOLD}$USERNAME${NC}                                 ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  • Interfaz: ${BOLD}KDE Plasma${NC}                               ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}  • Interfaz: ${BOLD}KDE Plasma Minimal${NC}                      ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}  • Sistema de archivos: ${BOLD}BTRFS${NC}                         ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}  • Swap: ${BOLD}ZRAM (${SWAP_PERCENTAGE}% de RAM)${NC}                   ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}  • Modo de arranque: ${BOLD}${boot_mode^^}${NC}                          ${GREEN}║${NC}"
@@ -1372,4 +1515,3 @@ trap 'print_err "Instalación interrumpida por el usuario"; exit 1' INT TERM
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main "$@"
 fi
-```
