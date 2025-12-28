@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Arch Linux Installer - KDE Plasma Argentina
-# Script completo con manejo robusto de mirrors y correcciones críticas
+# Script corregido: Se eliminó reiserfsprogs (obsoleto) y corregido mount UEFI
 # Licencia: MIT
 
 set -euo pipefail
@@ -36,7 +36,7 @@ readonly BACKUP_MIRRORS=(
     "https://mirror.selfnet.de/archlinux/\$repo/os/\$arch"
 )
 
-# Paquetes base
+# Paquetes base (CORREGIDO: Eliminado reiserfsprogs)
 readonly BASE_PACKAGES=(
     base base-devel linux linux-firmware linux-headers
     btrfs-progs sudo nano vim bash-completion
@@ -44,7 +44,7 @@ readonly BASE_PACKAGES=(
     git curl wget openssh rsync archlinux-keyring
     man-db man-pages texinfo usbutils pciutils
     dosfstools mtools fuse2 fuse3 fuse
-    xfsprogs jfsutils reiserfsprogs ntfs-3g exfatprogs
+    xfsprogs jfsutils ntfs-3g exfatprogs
 )
 
 # Paquetes KDE Plasma mínimo
@@ -68,7 +68,7 @@ readonly KDE_PACKAGES=(
     xdg-utils
     pipewire pipewire-pulse pipewire-alsa wireplumber
     phonon-qt5-gstreamer
-    xorg-server # Añadido para compatibilidad con aplicaciones que requieren Xorg
+    xorg-server # Necesario para compatibilidad
     xorg-xinit
 )
 
@@ -681,9 +681,8 @@ generate_fstab() {
     sed -i 's|/dev/.* /var btrfs|& noatime,compress=zstd,space_cache=v2,subvol=@var|' /mnt/etc/fstab
     sed -i 's|/dev/.* /tmp btrfs|& noatime,compress=zstd,space_cache=v2,subvol=@tmp|' /mnt/etc/fstab
 
-    # En modo UEFI, /boot está montado (EFI). Genfstab ya lo generó.
-    # En modo BIOS, /boot está montado (ext4). Genfstab ya lo generó.
-    # No necesitamos añadir lógica manual extra si genfstab detectó los puntos de montaje correctos.
+    # Nota: genfstab ya añadió la entrada de /boot (EFI o ext4), 
+    # no es necesaria lógica extra manual aquí.
 
     print_success "Fstab generado"
 }
@@ -799,15 +798,9 @@ install_kde_plasma() {
 Current=breeze
 EOF
 
-        # Configurar autologin (opcional, comentado por defecto)
-        # echo "[Autologin]" >> /mnt/etc/sddm.conf
-        # echo "User=$USERNAME" >> /mnt/etc/sddm.conf
-        # echo "Session=plasma" >> /mnt/etc/sddm.conf
-
         print_success "KDE Plasma instalado"
     else
         print_warn "Hubo problemas instalando KDE Plasma, continuando..."
-        # No retornar error, continuar con la instalación
     fi
 
     return 0
@@ -890,12 +883,9 @@ install_bootloader() {
         # systemd-boot para UEFI
         print_substep "Instalando systemd-boot..."
 
-        # Nota: La partición EFI está montada en /mnt/boot, por lo que bootctl puede acceder a todo
-
-        # Instalar systemd-boot
+        # Instalar systemd-boot. Nota: /mnt/boot está montado con la partición EFI.
         arch-chroot /mnt bootctl install 2>/dev/null || {
             print_warn "Intentando método alternativo de instalación..."
-            # Forzar instalación si falla la detección automática
             arch-chroot /mnt bootctl install --path=/boot 2>/dev/null || true
         }
 
@@ -1032,7 +1022,7 @@ EOF
 }
 
 final_configuration() {
-    print_step "Aplicando configuración final" # Corregida falta de comilla
+    print_step "Aplicando configuración final"
 
     # Actualizar initramfs
     print_substep "Actualizando initramfs..."
@@ -1252,7 +1242,7 @@ main() {
             exit 1
         fi
 
-        # Montaje UEFI CORREGIDO: Montar EFI en /mnt/boot para que systemd-boot pueda leer los kernels
+        # Montaje UEFI CORREGIDO
         mkdir -p /mnt/boot
         mount "$efi_part" /mnt/boot 2>/dev/null || {
             print_err "No se pudo montar la partición EFI en /boot"
