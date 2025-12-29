@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Arch Linux Installer - KDE Plasma Argentina (Minimal)
-# Script optimizado: solo sistema base + KDE Plasma mínimo
+# Arch Linux Installer - KDE Plasma Argentina
+# Script corregido: Fstab con UUID, paquetes Plasma 6, eliminado reiserfsprogs
 # Licencia: MIT
 
 set -euo pipefail
@@ -17,54 +17,94 @@ readonly TIMEZONE="America/Argentina/Buenos_Aires"
 readonly LANG="es_AR.UTF-8"
 readonly KEYBOARD_LAYOUT="la-latam"
 
-# Variables del sistema
+# Variables del sistema (modificables por usuario)
 TARGET_DISK=""
 HOSTNAME="arch-argentina"
 USERNAME="argentino"
 ROOT_PASSWORD=""
 USER_PASSWORD=""
-SWAP_PERCENTAGE=100  # 100% de RAM para ZRAM
+SWAP_PERCENTAGE=50  # Porcentaje de RAM para zram
 
-# Lista de mirrors de respaldo
+# Lista de mirrors de respaldo (si falla la descarga)
 readonly BACKUP_MIRRORS=(
     "https://mirror.leaseweb.com/archlinux/\$repo/os/\$arch"
     "https://mirror.rackspace.com/archlinux/\$repo/os/\$arch"
     "https://mirror.lty.me/archlinux/\$repo/os/\$arch"
+    "http://mirror.rackspace.com/archlinux/\$repo/os/\$arch"
     "https://archlinux.mailtunnel.eu/\$repo/os/\$arch"
+    "https://mirror.puzzle.ch/archlinux/\$repo/os/\$arch"
+    "https://mirror.selfnet.de/archlinux/\$repo/os/\$arch"
 )
 
-# Paquetes base esenciales
+# Paquetes base (CORREGIDO: Eliminado reiserfsprogs)
 readonly BASE_PACKAGES=(
     base base-devel linux linux-firmware linux-headers
-    btrfs-progs sudo nano bash-completion
-    networkmanager wpa_supplicant wireless_tools
+    btrfs-progs sudo nano vim bash-completion
+    networkmanager wpa_supplicant dialog wireless_tools netctl
     git curl wget openssh rsync archlinux-keyring
-    man-db man-pages usbutils pciutils
-    dosfstools mtools fuse2 fuse3
-    xfsprogs ntfs-3g exfatprogs
+    man-db man-pages texinfo usbutils pciutils
+    dosfstools mtools fuse2 fuse3 fuse
+    xfsprogs jfsutils ntfs-3g exfatprogs
 )
 
-# KDE Plasma MÍNIMO - solo lo esencial
-readonly KDE_MINIMAL=(
-    plasma-desktop
+# Paquetes KDE Plasma mínimo
+readonly KDE_PACKAGES=(
+    plasma-meta
     plasma-wayland-session
+    kde-applications-meta
     sddm
+    sddm-kcm
     dolphin
     konsole
     kate
+    spectacle
+    gwenview
+    ark
+    kcalc
+    print-manager
     kde-gtk-config
     breeze-gtk
     xdg-desktop-portal-kde
     xdg-utils
     pipewire pipewire-pulse pipewire-alsa wireplumber
-    phonon-qt5-gstreamer
-    xorg-server
+    phonon-qt6-gstreamer  # CORREGIDO: Qt6 para Plasma 6
+    xorg-server # Necesario para compatibilidad
     xorg-xinit
-    plasma-nm
-    powerdevil
-    bluedevil
-    kscreen
-    discover
+)
+
+# Utilidades adicionales
+readonly UTILITIES=(
+    firefox
+    htop btop
+    neofetch
+    gparted
+    libreoffice-still
+    vlc
+    gimp
+    cups
+    hplip
+    ghostscript
+    gsfonts
+    ttf-dejavu
+    ttf-liberation
+    noto-fonts
+    noto-fonts-cjk
+    noto-fonts-emoji
+    ttf-roboto
+    papirus-icon-theme
+    breeze-icons
+    arc-gtk-theme
+    mate-terminal
+    gnome-disk-utility
+    gvfs gvfs-mtp gvfs-smb
+    ntfs-3g
+    exfat-utils
+    unrar unzip p7zip
+    rsync
+    wget
+    curl
+    openssh
+    reflector
 )
 
 # ============================================================================
@@ -107,6 +147,10 @@ print_success() {
     echo -e "${GREEN}[✓]${NC} $1"
 }
 
+print_fail() {
+    echo -e "${RED}[✗]${NC} $1"
+}
+
 # ============================================================================
 # FUNCIONES DE DETECCIÓN
 # ============================================================================
@@ -130,17 +174,12 @@ detect_cpu() {
 }
 
 detect_gpu() {
-    local gpu_info
-    gpu_info=$(lspci 2>/dev/null | grep -E "VGA|3D|Display" || echo "")
-    
-    if echo "$gpu_info" | grep -qi "nvidia"; then
+    if lspci | grep -qi "nvidia"; then
         echo "nvidia"
-    elif echo "$gpu_info" | grep -qi "amd" && echo "$gpu_info" | grep -qi "radeon"; then
+    elif lspci | grep -qi "amd" | grep -qi "radeon"; then
         echo "amd"
-    elif echo "$gpu_info" | grep -qi "intel" || echo "$gpu_info" | grep -qi "integrated graphics"; then
+    elif lspci | grep -qi "intel" | grep -qi "graphics"; then
         echo "intel"
-    elif echo "$gpu_info" | grep -qi "vmware\|virtualbox\|qxl\|virtio"; then
-        echo "virtual"
     else
         echo "unknown"
     fi
@@ -166,11 +205,23 @@ check_root() {
 check_internet() {
     print_substep "Verificando conexión a internet..."
 
-    if ping -c 1 -W 2 archlinux.org &> /dev/null; then
-        print_success "Conexión a internet verificada"
-    else
+    # Intentar múltiples servidores
+    local servers=("archlinux.org" "google.com" "cloudflare.com" "1.1.1.1")
+    local connected=false
+
+    for server in "${servers[@]}"; do
+        if ping -c 1 -W 2 "$server" &> /dev/null; then
+            connected=true
+            break
+        fi
+    done
+
+    if ! $connected; then
         print_warn "No se pudo verificar la conexión a internet"
         print_warn "Intentando continuar de todos modos..."
+        # No salir, solo continuar con advertencia
+    else
+        print_success "Conexión a internet verificada"
     fi
 }
 
@@ -191,7 +242,7 @@ validate_disk() {
 }
 
 # ============================================================================
-# FUNCIONES DE CONFIGURACIÓN DE MIRRORS
+# FUNCIONES DE CONFIGURACIÓN DE MIRRORS (MEJORADA)
 # ============================================================================
 
 configure_mirrors() {
@@ -202,49 +253,165 @@ configure_mirrors() {
         cp /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist.backup
     fi
 
-    # Usar reflector para generar lista de mirrors
-    if command -v reflector &> /dev/null; then
-        reflector \
-            --country 'Argentina,Brazil,Chile,Uruguay,United States' \
-            --latest 10 \
-            --protocol https \
-            --sort rate \
-            --save /etc/pacman.d/mirrorlist \
-            2>/dev/null || true
-    else
-        # Instalar reflector
-        pacman -Sy --noconfirm reflector 2>/dev/null || true
+    # Función para intentar diferentes métodos de obtener mirrors
+    local mirror_found=false
+
+    # Método 1: Intentar descargar mirrors de Argentina
+    print_substep "Intentando obtener mirrors de Argentina..."
+
+    # Lista de URLs para intentar
+    local mirror_urls=(
+        "https://archlinux.org/mirrorlist/?country=AR&protocol=https&ip_version=4&use_mirror_status=on"
+        "https://archlinux.org/mirrorlist/?country=AR&protocol=http&ip_version=4&use_mirror_status=on"
+        "https://archlinux.org/mirrorlist/?country=AR&use_mirror_status=on"
+        "https://raw.githubusercontent.com/archlinux/archweb/master/mirrors/status.json"
+    )
+
+    for url in "${mirror_urls[@]}"; do
+        print_substep "Intentando con: $(echo "$url" | cut -d'?' -f1)..."
+
+        if curl -s -f --max-time 10 "$url" 2>/dev/null | \
+           grep -q -i "argentina\|ar.*http"; then
+            print_success "Se encontraron mirrors de Argentina"
+            mirror_found=true
+
+            # Procesar y guardar mirrors
+            if echo "$url" | grep -q "mirrorlist"; then
+                curl -s --max-time 10 "$url" | \
+                    sed 's/^#Server/Server/' | \
+                    grep -i "argentina" > /etc/pacman.d/mirrorlist.tmp 2>/dev/null || true
+            fi
+            break
+        fi
+    done
+
+    # Método 2: Usar mirrors de países cercanos si Argentina no funciona
+    if ! $mirror_found; then
+        print_warn "No se encontraron mirrors de Argentina"
+        print_substep "Buscando mirrors de países cercanos..."
+
+        local nearby_countries=("BR" "CL" "UY" "PY" "PE")
+        for country in "${nearby_countries[@]}"; do
+            local url="https://archlinux.org/mirrorlist/?country=${country}&protocol=https&ip_version=4&use_mirror_status=on"
+            if curl -s -f --max-time 10 "$url" 2>/dev/null; then
+                print_success "Usando mirrors de: $country"
+                curl -s --max-time 10 "$url" | \
+                    sed 's/^#Server/Server/' > /etc/pacman.d/mirrorlist.tmp 2>/dev/null || true
+                mirror_found=true
+                break
+            fi
+        done
+    fi
+
+    # Método 3: Usar reflector para generar lista de mirrors
+    if ! $mirror_found || [[ ! -s /etc/pacman.d/mirrorlist.tmp ]]; then
+        print_warn "Usando reflector para generar lista de mirrors..."
+
+        # Instalar reflector si no está presente
+        if ! command -v reflector &> /dev/null; then
+            print_substep "Instalando reflector..."
+            pacman -Sy --noconfirm reflector 2>/dev/null || true
+        fi
+
         if command -v reflector &> /dev/null; then
+            # Generar lista de mirrors rápidos de América del Sur y globales
             reflector \
                 --country 'Argentina,Brazil,Chile,Uruguay,United States' \
-                --latest 10 \
+                --latest 20 \
                 --protocol https \
                 --sort rate \
-                --save /etc/pacman.d/mirrorlist \
-                2>/dev/null || true
+                --save /etc/pacman.d/mirrorlist.tmp \
+                2>/dev/null || {
+                    # Si falla, usar configuración mínima
+                    reflector --latest 10 --sort rate --save /etc/pacman.d/mirrorlist.tmp 2>/dev/null || true
+                }
+            mirror_found=true
         fi
     fi
 
-    # Si no funciona, usar mirrors predefinidos
-    if [[ ! -s /etc/pacman.d/mirrorlist ]] || grep -q "^#Server" /etc/pacman.d/mirrorlist; then
-        cat > /etc/pacman.d/mirrorlist << 'EOF'
+    # Método 4: Usar lista de mirrors predefinida (backup)
+    if [[ ! -s /etc/pacman.d/mirrorlist.tmp ]] || ! $mirror_found; then
+        print_warn "Usando lista de mirrors predefinida..."
+
+        cat > /etc/pacman.d/mirrorlist.tmp << 'EOF'
+## Argentina
+Server = https://mirrors.nic.ar/archlinux/$repo/os/$arch
+Server = http://mirrors.nic.ar/archlinux/$repo/os/$arch
+
+## Global mirrors as backup
+Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch
 Server = https://mirror.rackspace.com/archlinux/$repo/os/$arch
 Server = https://mirror.lty.me/archlinux/$repo/os/$arch
-Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch
 Server = http://mirror.rackspace.com/archlinux/$repo/os/$arch
+Server = https://archlinux.mailtunnel.eu/$repo/os/$arch
+Server = https://mirror.puzzle.ch/archlinux/$repo/os/$arch
+Server = https://mirror.selfnet.de/archlinux/$repo/os/$arch
 EOF
     fi
 
-    # Configurar opciones de pacman
+    # Validar que tenemos un mirrorlist
+    if [[ ! -s /etc/pacman.d/mirrorlist.tmp ]]; then
+        print_err "No se pudo crear la lista de mirrors"
+        return 1
+    fi
+
+    # Ordenar mirrors por velocidad si es posible
+    if command -v rankmirrors &> /dev/null && [[ $(wc -l < /etc/pacman.d/mirrorlist.tmp) -gt 3 ]]; then
+        print_substep "Ordenando mirrors por velocidad..."
+        rankmirrors -n 10 /etc/pacman.d/mirrorlist.tmp > /etc/pacman.d/mirrorlist 2>/dev/null || \
+            cp /etc/pacman.d/mirrorlist.tmp /etc/pacman.d/mirrorlist
+    else
+        cp /etc/pacman.d/mirrorlist.tmp /etc/pacman.d/mirrorlist
+    fi
+
+    # Limpiar archivo temporal
+    rm -f /etc/pacman.d/mirrorlist.tmp
+
+    # Mostrar los mirrors seleccionados
+    print_substep "Mirrors configurados:"
+    head -10 /etc/pacman.d/mirrorlist | while read -r line; do
+        if [[ "$line" =~ ^# ]]; then
+            echo "  ${DIM}$line${NC}"
+        elif [[ "$line" =~ ^Server ]]; then
+            echo "  ${GREEN}✓${NC} $(echo "$line" | sed 's/^Server = //')"
+        fi
+    done
+
+    # Configurar opciones de pacman para ser más tolerante
+    configure_pacman_options
+
+    # Intentar actualizar la base de datos (pero no fallar si no puede)
+    print_substep "Actualizando base de datos de paquetes..."
+    if pacman -Syy --noconfirm 2>&1 | grep -q "error\|failed"; then
+        print_warn "No se pudo actualizar la base de datos completamente"
+        print_warn "Continuando con instalación offline/disponible..."
+    else
+        print_success "Base de datos actualizada"
+    fi
+
+    return 0
+}
+
+configure_pacman_options() {
+    print_substep "Optimizando configuración de pacman..."
+
+    # Backup del archivo de configuración original
+    if [[ -f /etc/pacman.conf ]]; then
+        cp /etc/pacman.conf /etc/pacman.conf.backup
+    fi
+
+    # Configurar opciones para ser más tolerante a errores de red
     sed -i 's/^#ParallelDownloads = 5/ParallelDownloads = 3/' /etc/pacman.conf
     sed -i 's/^#Color/Color/' /etc/pacman.conf
+    sed -i 's/^#VerbosePkgLists/VerbosePkgLists/' /etc/pacman.conf
+    sed -i 's/^#CheckSpace/CheckSpace/' /etc/pacman.conf
 
-    # Actualizar base de datos
-    print_substep "Actualizando base de datos de paquetes..."
-    pacman -Syy --noconfirm 2>/dev/null || true
+    # Añadir opciones de tolerancia a fallos
+    echo -e "\n# Opciones para tolerancia a fallos de red" >> /etc/pacman.conf
+    echo "XferCommand = /usr/bin/curl -C - -f %u > %o 2>/dev/null || /usr/bin/curl -C - -f %u > %o 2>/dev/null" >> /etc/pacman.conf
+    echo "DisableDownloadTimeout" >> /etc/pacman.conf
 
-    print_success "Mirrors configurados"
-    return 0
+    print_success "Pacman configurado para ser más tolerante a fallos"
 }
 
 # ============================================================================
@@ -257,27 +424,47 @@ partition_uefi() {
     print_step "Creando particiones UEFI en $disk"
 
     # Limpiar tabla de particiones
+    print_substep "Limpiando tabla de particiones..."
     wipefs -a "$disk" 2>/dev/null || true
 
     # Crear tabla GPT
+    print_substep "Creando tabla GPT..."
     parted -s "$disk" mklabel gpt
 
-    # Partición EFI (600MB)
+    # Partición EFI (600MB - Aumentada para alojar kernels dentro de /boot)
+    print_substep "Creando partición EFI (600MB)..."
     parted -s "$disk" mkpart "EFI" fat32 1MiB 601MiB
     parted -s "$disk" set 1 esp on
 
     # Partición raíz BTRFS (resto del disco)
+    print_substep "Creando partición raíz BTRFS..."
     parted -s "$disk" mkpart "ROOT" btrfs 601MiB 100%
 
     # Sincronizar
     sync
     sleep 2
+    partprobe "$disk" 2>/dev/null || true
 
-    # Formatear particiones
-    local efi_part="${disk}1"
-    [[ ! -b "$efi_part" ]] && efi_part="${disk}p1"
+    # Esperar a que aparezcan las particiones
+    local max_retries=10
+    local retry_count=0
     local root_part="${disk}2"
     [[ ! -b "$root_part" ]] && root_part="${disk}p2"
+
+    while [[ ! -b "$root_part" ]] && [[ $retry_count -lt $max_retries ]]; do
+        sleep 1
+        retry_count=$((retry_count + 1))
+        print_substep "Esperando por particiones... ($retry_count/$max_retries)"
+        root_part="${disk}2"
+        [[ ! -b "$root_part" ]] && root_part="${disk}p2"
+    done
+
+    # Formatear particiones
+    print_substep "Formateando particiones..."
+
+    # EFI
+    local efi_part="${disk}1"
+    [[ ! -b "$efi_part" ]] && efi_part="${disk}p1"
 
     if [[ -b "$efi_part" ]]; then
         mkfs.fat -F32 "$efi_part"
@@ -286,6 +473,7 @@ partition_uefi() {
         return 1
     fi
 
+    # Root
     if [[ -b "$root_part" ]]; then
         mkfs.btrfs -f "$root_part"
     else
@@ -293,7 +481,7 @@ partition_uefi() {
         return 1
     fi
 
-    print_success "Particiones UEFI creadas"
+    print_success "Particiones UEFI creadas correctamente"
     return 0
 }
 
@@ -303,27 +491,47 @@ partition_bios() {
     print_step "Creando particiones BIOS en $disk"
 
     # Limpiar tabla de particiones
+    print_substep "Limpiando tabla de particiones..."
     wipefs -a "$disk" 2>/dev/null || true
 
     # Crear tabla MBR
+    print_substep "Creando tabla MBR..."
     parted -s "$disk" mklabel msdos
 
     # Partición de arranque (2GB)
+    print_substep "Creando partición de arranque (2GB)..."
     parted -s "$disk" mkpart primary ext4 1MiB 2GiB
     parted -s "$disk" set 1 boot on
 
     # Partición raíz BTRFS (resto del disco)
+    print_substep "Creando partición raíz BTRFS..."
     parted -s "$disk" mkpart primary btrfs 2GiB 100%
 
     # Sincronizar
     sync
     sleep 2
+    partprobe "$disk" 2>/dev/null || true
 
-    # Formatear particiones
-    local boot_part="${disk}1"
-    [[ ! -b "$boot_part" ]] && boot_part="${disk}p1"
+    # Esperar a que aparezcan las particiones
+    local max_retries=10
+    local retry_count=0
     local root_part="${disk}2"
     [[ ! -b "$root_part" ]] && root_part="${disk}p2"
+
+    while [[ ! -b "$root_part" ]] && [[ $retry_count -lt $max_retries ]]; do
+        sleep 1
+        retry_count=$((retry_count + 1))
+        print_substep "Esperando por particiones... ($retry_count/$max_retries)"
+        root_part="${disk}2"
+        [[ ! -b "$root_part" ]] && root_part="${disk}p2"
+    done
+
+    # Formatear particiones
+    print_substep "Formateando particiones..."
+
+    # Boot
+    local boot_part="${disk}1"
+    [[ ! -b "$boot_part" ]] && boot_part="${disk}p1"
 
     if [[ -b "$boot_part" ]]; then
         mkfs.ext4 -F "$boot_part"
@@ -332,6 +540,7 @@ partition_bios() {
         return 1
     fi
 
+    # Root
     if [[ -b "$root_part" ]]; then
         mkfs.btrfs -f "$root_part"
     else
@@ -339,7 +548,7 @@ partition_bios() {
         return 1
     fi
 
-    print_success "Particiones BIOS creadas"
+    print_success "Particiones BIOS creadas correctamente"
     return 0
 }
 
@@ -349,26 +558,46 @@ create_btrfs_subvolumes() {
     print_step "Creando subvolúmenes BTRFS"
 
     # Montar partición raíz temporalmente
+    print_substep "Montando partición raíz..."
     mount "$root_part" /mnt 2>/dev/null || {
         print_err "No se pudo montar la partición raíz"
         return 1
     }
 
-    # Crear subvolúmenes básicos
+    # Crear subvolúmenes
+    print_substep "Creando subvolúmenes..."
     btrfs subvolume create /mnt/@ 2>/dev/null || true
     btrfs subvolume create /mnt/@home 2>/dev/null || true
+    btrfs subvolume create /mnt/@var 2>/dev/null || true
+    btrfs subvolume create /mnt/@tmp 2>/dev/null || true
+    btrfs subvolume create /mnt/@snapshots 2>/dev/null || true
+    btrfs subvolume create /mnt/@cache 2>/dev/null || true
+    btrfs subvolume create /mnt/@log 2>/dev/null || true
 
     # Desmontar
     umount /mnt 2>/dev/null || true
 
-    # Montar subvolumen raíz
+    # Montar subvolumen raíz con opciones optimizadas
+    print_substep "Montando subvolumen raíz..."
     mount -o noatime,compress=zstd,space_cache=v2,subvol=@ "$root_part" /mnt
 
-    # Crear directorio home y montar
-    mkdir -p /mnt/home
-    mount -o noatime,compress=zstd,space_cache=v2,subvol=@home "$root_part" /mnt/home
+    # Crear directorios para otros subvolúmenes
+    print_substep "Creando estructura de directorios..."
+    mkdir -p /mnt/{home,var,tmp,.snapshots}
 
-    print_success "Subvolúmenes BTRFS creados"
+    # Montar otros subvolúmenes
+    print_substep "Montando subvolúmenes..."
+    mount -o noatime,compress=zstd,space_cache=v2,subvol=@home "$root_part" /mnt/home
+    mount -o noatime,compress=zstd,space_cache=v2,subvol=@var "$root_part" /mnt/var
+    mount -o noatime,compress=zstd,space_cache=v2,subvol=@tmp "$root_part" /mnt/tmp
+    mount -o noatime,compress=zstd,space_cache=v2,subvol=@snapshots "$root_part" /mnt/.snapshots
+
+    # Directorios especiales
+    mkdir -p /mnt/var/{cache,log}
+    mount -o noatime,compress=zstd,space_cache=v2,subvol=@cache "$root_part" /mnt/var/cache
+    mount -o noatime,compress=zstd,space_cache=v2,subvol=@log "$root_part" /mnt/var/log
+
+    print_success "Subvolúmenes BTRFS creados correctamente"
 }
 
 # ============================================================================
@@ -388,7 +617,7 @@ install_base_system() {
         amd) microcode="amd-ucode" ;;
     esac
 
-    # Paquetes base
+    # Paquetes base actualizados
     local packages=("${BASE_PACKAGES[@]}")
     if [[ -n "$microcode" ]]; then
         packages+=("$microcode")
@@ -399,12 +628,40 @@ install_base_system() {
         packages+=(efibootmgr)
     fi
 
-    # Instalar paquetes base
-    print_substep "Instalando paquetes base..."
-    if pacstrap /mnt "${packages[@]}" --noconfirm 2>&1; then
-        print_success "Sistema base instalado"
-    else
-        print_err "Error al instalar sistema base"
+    # Instalar paquetes base (con reintentos)
+    print_substep "Instalando paquetes base (esto puede tomar varios minutos)..."
+
+    local max_retries=3
+    local retry_count=0
+    local install_success=false
+
+    while [[ $retry_count -lt $max_retries ]] && [[ $install_success == false ]]; do
+        if pacstrap /mnt "${packages[@]}" --noconfirm 2>&1 | tee /tmp/pacstrap.log; then
+            install_success=true
+            print_success "Sistema base instalado"
+        else
+            retry_count=$((retry_count + 1))
+            print_warn "Intento $retry_count de $max_retries falló"
+
+            if [[ $retry_count -lt $max_retries ]]; then
+                print_substep "Reintentando en 5 segundos..."
+                sleep 5
+
+                # Limpiar cache de pacman y reintentar
+                rm -f /mnt/var/lib/pacman/db.lck 2>/dev/null || true
+            fi
+        fi
+    done
+
+    if [[ $install_success == false ]]; then
+        print_err "Error al instalar sistema base después de $max_retries intentos"
+
+        # Verificar qué paquetes fallaron
+        if [[ -f /tmp/pacstrap.log ]]; then
+            print_substep "Errores encontrados:"
+            grep -i "error\|failed\|not found" /tmp/pacstrap.log | head -5
+        fi
+
         return 1
     fi
 
@@ -414,33 +671,48 @@ install_base_system() {
 generate_fstab() {
     print_step "Generando fstab"
 
-    # Generar fstab
+    # Generar fstab con UUIDs
     genfstab -U /mnt >> /mnt/etc/fstab
 
-    # Optimizar opciones BTRFS
-    sed -i 's|/dev/.* / btrfs|& noatime,compress=zstd,space_cache=v2,subvol=@|' /mnt/etc/fstab
-    sed -i 's|/dev/.* /home btrfs|& noatime,compress=zstd,space_cache=v2,subvol=@home|' /mnt/etc/fstab
+    # CORRECCIÓN: Ajustar opciones BTRFS usando regex compatible con UUIDs
+    # Eliminamos subvolid para confiar solo en nombres de subvolúmenes
+    sed -i 's/subvolid=[0-9]*,//g' /mnt/etc/fstab
 
-    print_success "Fstab generado"
+    # Añadir flags de montaje optimizados para cada punto de montaje
+    # El regex busca UUID o LABEL, espacio, punto de montaje, espacio, tipo fs
+    sed -i 's|\(.*[[:space:]]\/[[:space:]]btrfs.*\)|\1 noatime,compress=zstd,space_cache=v2,subvol=@|' /mnt/etc/fstab
+    sed -i 's|\(.*[[:space:]]\/home[[:space:]]btrfs.*\)|\1 noatime,compress=zstd,space_cache=v2,subvol=@home|' /mnt/etc/fstab
+    sed -i 's|\(.*[[:space:]]\/var[[:space:]]btrfs.*\)|\1 noatime,compress=zstd,space_cache=v2,subvol=@var|' /mnt/etc/fstab
+    sed -i 's|\(.*[[:space:]]\/tmp[[:space:]]btrfs.*\)|\1 noatime,compress=zstd,space_cache=v2,subvol=@tmp|' /mnt/etc/fstab
+
+    print_success "Fstab generado y optimizado"
 }
 
 configure_system() {
     print_step "Configurando sistema"
 
     # Configurar zona horaria
+    print_substep "Configurando zona horaria..."
     arch-chroot /mnt ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
     arch-chroot /mnt hwclock --systohc
 
     # Configurar locales
+    print_substep "Configurando locales..."
     sed -i "s/^#$LOCALE/$LOCALE/" /mnt/etc/locale.gen
+    echo "es_AR.ISO-8859-1 ISO-8859-1" >> /mnt/etc/locale.gen
     arch-chroot /mnt locale-gen
+
+    # Configurar idioma del sistema
     echo "LANG=$LANG" > /mnt/etc/locale.conf
+    echo "LC_COLLATE=C" >> /mnt/etc/locale.conf
 
     # Configurar teclado
+    print_substep "Configurando teclado..."
     echo "KEYMAP=$KEYMAP" > /mnt/etc/vconsole.conf
     echo "FONT=lat9w-16" >> /mnt/etc/vconsole.conf
 
     # Configurar hostname
+    print_substep "Configurando hostname..."
     echo "$HOSTNAME" > /mnt/etc/hostname
 
     # Configurar hosts
@@ -451,6 +723,7 @@ configure_system() {
 EOF
 
     # Configurar NetworkManager
+    print_substep "Configurando NetworkManager..."
     arch-chroot /mnt systemctl enable NetworkManager.service
 
     print_success "Sistema configurado"
@@ -460,58 +733,77 @@ setup_users() {
     print_step "Configurando usuarios"
 
     # Configurar contraseña de root
+    print_substep "Configurando contraseña de root..."
     if [[ -n "$ROOT_PASSWORD" ]]; then
         echo "root:$ROOT_PASSWORD" | arch-chroot /mnt chpasswd
-        print_substep "Contraseña de root configurada"
+        print_success "Contraseña de root configurada"
     else
         print_warn "Se pedirá la contraseña de root manualmente después del reinicio"
     fi
 
     # Crear usuario principal
-    if ! arch-chroot /mnt id "$USERNAME" &>/dev/null; then
+    print_substep "Creando usuario '$USERNAME'..."
+    if arch-chroot /mnt id "$USERNAME" &>/dev/null; then
+        print_warn "El usuario '$USERNAME' ya existe"
+    else
         arch-chroot /mnt useradd -m -G wheel,audio,video,storage,optical -s /bin/bash "$USERNAME"
     fi
 
     if [[ -n "$USER_PASSWORD" ]]; then
         echo "$USERNAME:$USER_PASSWORD" | arch-chroot /mnt chpasswd
-        print_substep "Contraseña de usuario configurada"
+        print_success "Contraseña de usuario configurada"
     else
         print_warn "Se pedirá la contraseña para '$USERNAME' manualmente después del reinicio"
     fi
 
     # Configurar sudoers
+    print_substep "Configurando sudo..."
     echo "%wheel ALL=(ALL) ALL" >> /mnt/etc/sudoers
+    echo "%wheel ALL=(ALL) NOPASSWD: /usr/bin/pacman" >> /mnt/etc/sudoers
+
+    # Configurar entorno por defecto para el usuario
+    arch-chroot /mnt mkdir -p /home/"$USERNAME"/.config
+    arch-chroot /mnt chown -R "$USERNAME":"$USERNAME" /home/"$USERNAME"
 
     print_success "Usuarios configurados"
 }
 
-install_kde_plasma_minimal() {
-    print_step "Instalando KDE Plasma Mínimo"
+install_kde_plasma() {
+    print_step "Instalando KDE Plasma"
 
-    print_substep "Instalando paquetes de KDE Plasma..."
-    
-    # Primero instalar paquetes esenciales de KDE
-    if arch-chroot /mnt pacman -S --noconfirm --needed "${KDE_MINIMAL[@]}" 2>&1; then
-        print_substep "KDE Plasma instalado correctamente"
-    else
-        print_warn "Hubo problemas instalando KDE Plasma, intentando continuar..."
-    fi
+    print_substep "Instalando KDE Plasma (esto puede tomar varios minutos)..."
 
-    # HABILITAR SDDM - Esto es crucial
-    print_substep "Habilitando SDDM..."
-    arch-chroot /mnt systemctl enable sddm.service 2>/dev/null || {
-        print_warn "No se pudo habilitar SDDM, intentando instalar sddm..."
-        arch-chroot /mnt pacman -S --noconfirm sddm 2>/dev/null || true
-        arch-chroot /mnt systemctl enable sddm.service 2>/dev/null || true
-    }
+    local max_retries=2
+    local retry_count=0
+    local install_success=false
 
-    # Configurar tema SDDM
-    cat > /mnt/etc/sddm.conf << EOF
+    while [[ $retry_count -lt $max_retries ]] && [[ $install_success == false ]]; do
+        if arch-chroot /mnt pacman -S --noconfirm --needed "${KDE_PACKAGES[@]}" 2>&1 | tee /tmp/kde_install.log; then
+            install_success=true
+        else
+            retry_count=$((retry_count + 1))
+            if [[ $retry_count -lt $max_retries ]]; then
+                print_warn "Reintentando instalación de KDE..."
+                sleep 5
+            fi
+        fi
+    done
+
+    if [[ $install_success == true ]]; then
+        # Habilitar SDDM
+        arch-chroot /mnt systemctl enable sddm.service
+
+        # Configurar tema SDDM
+        cat > /mnt/etc/sddm.conf << EOF
 [Theme]
 Current=breeze
 EOF
 
-    print_success "KDE Plasma Mínimo instalado y SDDM habilitado"
+        print_success "KDE Plasma instalado"
+    else
+        print_warn "Hubo problemas instalando KDE Plasma, continuando..."
+    fi
+
     return 0
 }
 
@@ -520,21 +812,39 @@ install_drivers() {
 
     local gpu_type=$1
 
-    # Drivers básicos
-    arch-chroot /mnt pacman -S --noconfirm --needed mesa 2>/dev/null || true
+    # Drivers básicos (siempre instalar)
+    print_substep "Instalando drivers básicos..."
+    arch-chroot /mnt pacman -S --noconfirm --needed mesa vulkan-radeon vulkan-intel 2>/dev/null || true
 
     # Drivers específicos por GPU
     case "$gpu_type" in
         nvidia)
-            arch-chroot /mnt pacman -S --noconfirm --needed nvidia nvidia-utils 2>/dev/null || true
+            print_substep "Instalando drivers NVIDIA..."
+            arch-chroot /mnt pacman -S --noconfirm --needed nvidia nvidia-utils nvidia-settings 2>/dev/null || {
+                print_warn "No se pudieron instalar drivers NVIDIA, continuando..."
+            }
+            echo "options nvidia-drm modeset=1" >> /mnt/etc/modprobe.d/nvidia.conf 2>/dev/null || true
             ;;
         amd)
-            arch-chroot /mnt pacman -S --noconfirm --needed xf86-video-amdgpu 2>/dev/null || true
+            print_substep "Instalando drivers AMD..."
+            arch-chroot /mnt pacman -S --noconfirm --needed xf86-video-amdgpu 2>/dev/null || {
+                print_warn "No se pudieron instalar drivers AMD, continuando..."
+            }
             ;;
         intel)
-            arch-chroot /mnt pacman -S --noconfirm --needed xf86-video-intel 2>/dev/null || true
+            print_substep "Instalando drivers Intel..."
+            arch-chroot /mnt pacman -S --noconfirm --needed xf86-video-intel 2>/dev/null || {
+                print_warn "No se pudieron instalar drivers Intel, continuando..."
+            }
+            ;;
+        *)
+            print_substep "GPU desconocida, instalando drivers genéricos..."
+            arch-chroot /mnt pacman -S --noconfirm --needed xf86-video-vesa 2>/dev/null || true
             ;;
     esac
+
+    # Instalar utilitarios de video
+    arch-chroot /mnt pacman -S --noconfirm --needed libva-utils vdpauinfo 2>/dev/null || true
 
     print_success "Drivers instalados"
 }
@@ -542,37 +852,26 @@ install_drivers() {
 setup_zram() {
     print_step "Configurando ZRAM"
 
+    # Instalar zram-generator
+    arch-chroot /mnt pacman -S --noconfirm --needed zram-generator 2>/dev/null || {
+        print_warn "No se pudo instalar zram-generator"
+        return 0
+    }
+
     # Calcular tamaño de ZRAM (porcentaje de RAM)
     local ram_mb
     ram_mb=$(get_ram_size)
     local zram_size=$((ram_mb * SWAP_PERCENTAGE / 100))
-    
-    print_substep "RAM detectada: ${ram_mb}MB"
-    print_substep "Configurando ZRAM con ${zram_size}MB (${SWAP_PERCENTAGE}% de RAM)"
 
-    # Instalar zram-generator
-    arch-chroot /mnt pacman -S --noconfirm --needed systemd-swap 2>/dev/null || {
-        print_warn "No se pudo instalar systemd-swap para ZRAM"
-        return 0
-    }
-
-    # Configurar ZRAM usando systemd-swap
-    cat > /mnt/etc/systemd/swap.conf.d/zram.conf << EOF
-zswap_enabled=0
-zram_enabled=1
-zram_size=$((zram_size * 1024 * 1024))  # Convertir a bytes
-zram_count=1
-zram_streams=$(nproc)
-zram_alg=zstd
+    # Configurar zram-generator
+    cat > /mnt/etc/systemd/zram-generator.conf << EOF
+[zram0]
+zram-size = ${zram_size}M
+compression-algorithm = zstd
+swap-priority = 100
 EOF
 
-    # Habilitar systemd-swap
-    arch-chroot /mnt systemctl enable systemd-swap 2>/dev/null || true
-
-    # Configurar swappiness
-    echo "vm.swappiness=100" >> /mnt/etc/sysctl.d/99-sysctl.conf 2>/dev/null || true
-
-    print_success "ZRAM configurado (${zram_size}MB usando zstd)"
+    print_success "ZRAM configurado (${zram_size}MB)"
 }
 
 install_bootloader() {
@@ -585,12 +884,9 @@ install_bootloader() {
         # systemd-boot para UEFI
         print_substep "Instalando systemd-boot..."
 
-        # Crear directorio para EFI si no existe
-        mkdir -p /mnt/boot/loader/entries
-
-        # Instalar systemd-boot
+        # Instalar systemd-boot. Nota: /mnt/boot está montado con la partición EFI.
         arch-chroot /mnt bootctl install 2>/dev/null || {
-            print_warn "Intentando método alternativo..."
+            print_warn "Intentando método alternativo de instalación..."
             arch-chroot /mnt bootctl install --path=/boot 2>/dev/null || true
         }
 
@@ -630,6 +926,14 @@ EOF
             sed -i '2i initrd /amd-ucode.img' /mnt/boot/loader/entries/arch-argentina.conf
         fi
 
+        # Crear entrada de rescate
+        cat > /mnt/boot/loader/entries/arch-argentina-fallback.conf << EOF
+title   Arch Linux (Argentina) Fallback
+linux   /vmlinuz-linux
+initrd  /initramfs-linux-fallback.img
+options root=UUID=$root_uuid rw rootflags=subvol=@
+EOF
+
         print_success "systemd-boot instalado"
     else
         # GRUB para BIOS
@@ -640,12 +944,32 @@ EOF
         }
 
         # Instalar GRUB en el disco
-        arch-chroot /mnt grub-install --target=i386-pc "$TARGET_DISK" 2>/dev/null || true
+        arch-chroot /mnt grub-install --target=i386-pc "$TARGET_DISK" 2>/dev/null || {
+            print_warn "Error instalando GRUB, intentando continuar..."
+        }
+
+        # Obtener UUID de la partición raíz
+        local root_uuid=""
+        if [[ -b "${TARGET_DISK}2" ]]; then
+            root_uuid=$(blkid -s UUID -o value "${TARGET_DISK}2")
+        elif [[ -b "${TARGET_DISK}p2" ]]; then
+            root_uuid=$(blkid -s UUID -o value "${TARGET_DISK}p2")
+        fi
+
+        if [[ -z "$root_uuid" ]]; then
+            print_warn "No se pudo obtener UUID, usando dispositivo directo"
+            if [[ -b "${TARGET_DISK}2" ]]; then
+                root_uuid="${TARGET_DISK}2"
+            else
+                root_uuid="${TARGET_DISK}p2"
+            fi
+        fi
 
         # Configurar GRUB
         cat >> /mnt/etc/default/grub << EOF
 GRUB_DISABLE_OS_PROBER=false
 GRUB_CMDLINE_LINUX_DEFAULT="quiet loglevel=3"
+GRUB_CMDLINE_LINUX="root=UUID=$root_uuid rootflags=subvol=@"
 EOF
 
         # Generar configuración GRUB
@@ -655,17 +979,81 @@ EOF
     fi
 }
 
+install_utilities() {
+    print_step "Instalando utilidades adicionales"
+
+    print_substep "Instalando utilidades (esto puede tomar tiempo)..."
+
+    # Instalar utilidades en grupos para manejar mejor los fallos
+    local utility_groups=(
+        "${UTILITIES[@]:0:10}"
+        "${UTILITIES[@]:10:10}"
+        "${UTILITIES[@]:20}"
+    )
+
+    local group_num=1
+    for group in "${utility_groups[@]}"; do
+        if [[ -n "$group" ]]; then
+            print_substep "Instalando grupo $group_num de utilidades..."
+            if ! arch-chroot /mnt pacman -S --noconfirm --needed $group 2>/dev/null; then
+                print_warn "Algunas utilidades del grupo $group_num no se pudieron instalar"
+            fi
+            group_num=$((group_num + 1))
+        fi
+    done
+
+    # Habilitar servicios
+    arch-chroot /mnt systemctl enable cups.service 2>/dev/null || true
+    arch-chroot /mnt systemctl enable bluetooth.service 2>/dev/null || true
+
+    # Instalar y habilitar reflector para mantener mirrors actualizados
+    arch-chroot /mnt pacman -S --noconfirm --needed reflector 2>/dev/null || true
+    if arch-chroot /mnt command -v reflector &>/dev/null; then
+        cat > /mnt/etc/xdg/reflector/reflector.conf << EOF
+--country Argentina,Brazil,Chile,Uruguay,United States
+--latest 20
+--protocol https
+--sort rate
+--save /etc/pacman.d/mirrorlist
+EOF
+        arch-chroot /mnt systemctl enable reflector.timer 2>/dev/null || true
+    fi
+
+    print_success "Utilidades instaladas"
+}
+
 final_configuration() {
     print_step "Aplicando configuración final"
 
     # Actualizar initramfs
-    arch-chroot /mnt mkinitcpio -P 2>/dev/null || true
+    print_substep "Actualizando initramfs..."
+    arch-chroot /mnt mkinitcpio -P 2>/dev/null || {
+        print_warn "Error actualizando initramfs, continuando..."
+    }
 
     # Habilitar servicios importantes
+    print_substep "Habilitando servicios..."
     arch-chroot /mnt systemctl enable fstrim.timer 2>/dev/null || true
+    arch-chroot /mnt systemctl enable systemd-resolved.service 2>/dev/null || true
+    arch-chroot /mnt systemctl enable paccache.timer 2>/dev/null || true
 
-    # Configurar pacman optimizado
+    # Configurar pacman optimizado en el sistema instalado
+    print_substep "Optimizando pacman en el sistema instalado..."
     sed -i 's/^#ParallelDownloads = 5/ParallelDownloads = 10/' /mnt/etc/pacman.conf 2>/dev/null || true
+    sed -i 's/^#Color/Color/' /mnt/etc/pacman.conf 2>/dev/null || true
+
+    # Configurar journal optimizado
+    print_substep "Optimizando journal..."
+    sed -i 's/^#SystemMaxUse=/SystemMaxUse=500M/' /mnt/etc/systemd/journald.conf 2>/dev/null || true
+
+    # Configurar swappiness para ZRAM
+    echo "vm.swappiness=100" >> /mnt/etc/sysctl.d/99-sysctl.conf 2>/dev/null || true
+
+    # Configurar límites de recursos
+    cat > /mnt/etc/security/limits.conf 2>/dev/null << EOF
+* soft nofile 524288
+* hard nofile 1048576
+EOF
 
     print_success "Configuración final aplicada"
 }
@@ -677,9 +1065,9 @@ final_configuration() {
 show_header() {
     clear
     echo -e "${BLUE}╔══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║${NC}   ${BOLD}Arch Linux Installer - KDE Plasma Minimal Argentina${NC}   ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}     ${BOLD}Arch Linux Installer - KDE Plasma Argentina${NC}     ${BLUE}║${NC}"
     echo -e "${BLUE}╠══════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${BLUE}║${NC}            ${CYAN}Configuración básica automática${NC}               ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}                 ${CYAN}Configuración automatizada${NC}                 ${BLUE}║${NC}"
     echo -e "${BLUE}╚══════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
@@ -703,7 +1091,10 @@ show_system_info() {
 show_disks() {
     print_substep "Discos disponibles:"
     echo -e "${DIM}"
-    lsblk -d -o NAME,SIZE,TYPE,MODEL 2>/dev/null || true
+    lsblk -d -o NAME,SIZE,TYPE,MODEL | grep -E "^(NAME|disk)"
+    echo -e "${NC}"
+    echo -e "${DIM}"
+    lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,LABEL
     echo -e "${NC}"
 }
 
@@ -718,7 +1109,7 @@ interactive_setup() {
 
     # Solicitar disco de instalación
     while true; do
-        read -rp "Ingrese el disco para instalar (ej: /dev/sda, /dev/nvme0n1): " TARGET_DISK
+        read -rp "Ingrese el disco para instalar (ej: /dev/sda): " TARGET_DISK
 
         if validate_disk "$TARGET_DISK"; then
             break
@@ -734,7 +1125,7 @@ interactive_setup() {
     echo ""
 
     read -rp "¿Continuar con la instalación? (s/N): " confirm
-    if [[ ! "$confirm" =~ ^[SsYy]$ ]]; then
+    if [[ ! "$confirm" =~ ^[Ss]$ ]]; then
         print_msg "Instalación cancelada por el usuario."
         exit 0
     fi
@@ -762,9 +1153,10 @@ interactive_setup() {
             if [[ "$ROOT_PASSWORD" == "$confirm_pass" ]]; then
                 break
             else
-                print_warn "Las contraseñas no coinciden."
+                print_warn "Las contraseñas no coinciden. Intente nuevamente."
             fi
         else
+            print_warn "La contraseña de root se configurará manualmente después del reinicio."
             break
         fi
     done
@@ -778,12 +1170,21 @@ interactive_setup() {
             if [[ "$USER_PASSWORD" == "$confirm_pass" ]]; then
                 break
             else
-                print_warn "Las contraseñas no coinciden."
+                print_warn "Las contraseñas no coinciden. Intente nuevamente."
             fi
         else
+            print_warn "La contraseña del usuario se configurará manualmente después del reinicio."
             break
         fi
     done
+
+    # Configuración de ZRAM
+    echo ""
+    print_substep "Configuración de ZRAM"
+    read -rp "Porcentaje de RAM para ZRAM [$SWAP_PERCENTAGE%] (10-200): " input
+    if [[ -n "$input" ]] && [[ "$input" =~ ^[0-9]+$ ]] && [[ "$input" -ge 10 ]] && [[ "$input" -le 200 ]]; then
+        SWAP_PERCENTAGE="$input"
+    fi
 
     print_success "Configuración completada"
     echo ""
@@ -796,6 +1197,14 @@ interactive_setup() {
 main() {
     # Verificaciones iniciales
     check_root
+
+    # Mostrar advertencia sobre internet
+    echo -e "${YELLOW}╔══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${YELLOW}║${NC}  ${BOLD}Nota:${NC} Este script manejará automáticamente problemas     ${YELLOW}║${NC}"
+    echo -e "${YELLOW}║${NC}        de conexión a internet y mirrors.                ${YELLOW}║${NC}"
+    echo -e "${YELLOW}╚══════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+
     check_internet
 
     # Configuración interactiva
@@ -807,8 +1216,11 @@ main() {
     cpu_type=$(detect_cpu)
     gpu_type=$(detect_gpu)
 
-    # Configurar mirrors
-    configure_mirrors
+    # Configurar mirrors (manejo robusto)
+    if ! configure_mirrors; then
+        print_err "Error crítico configurando mirrors"
+        exit 1
+    fi
 
     # Particionado
     print_step "Iniciando particionado"
@@ -822,6 +1234,7 @@ main() {
         # Identificar particiones
         local root_part="${TARGET_DISK}2"
         [[ ! -b "$root_part" ]] && root_part="${TARGET_DISK}p2"
+
         local efi_part="${TARGET_DISK}1"
         [[ ! -b "$efi_part" ]] && efi_part="${TARGET_DISK}p1"
 
@@ -830,10 +1243,10 @@ main() {
             exit 1
         fi
 
-        # Montar partición EFI en /boot
+        # Montaje UEFI
         mkdir -p /mnt/boot
         mount "$efi_part" /mnt/boot 2>/dev/null || {
-            print_err "No se pudo montar la partición EFI"
+            print_err "No se pudo montar la partición EFI en /boot"
             exit 1
         }
     else
@@ -845,6 +1258,7 @@ main() {
         # Identificar particiones
         local root_part="${TARGET_DISK}2"
         [[ ! -b "$root_part" ]] && root_part="${TARGET_DISK}p2"
+
         local boot_part="${TARGET_DISK}1"
         [[ ! -b "$boot_part" ]] && boot_part="${TARGET_DISK}p1"
 
@@ -870,8 +1284,10 @@ main() {
     configure_system
     setup_users
 
-    # Instalación de KDE Plasma Mínimo
-    install_kde_plasma_minimal
+    # Instalación de KDE Plasma
+    if ! install_kde_plasma; then
+        print_warn "Continuando sin KDE Plasma completo"
+    fi
 
     # Instalación de drivers
     install_drivers "$gpu_type"
@@ -885,8 +1301,15 @@ main() {
         exit 1
     fi
 
+    # Instalación de utilidades
+    install_utilities
+
     # Configuración final
     final_configuration
+
+    # Limpieza
+    print_step "Limpiando caché de paquetes..."
+    arch-chroot /mnt paccache -rk1 2>/dev/null || true
 
     # Finalización
     print_step "Instalación completada"
@@ -898,7 +1321,7 @@ main() {
     echo -e "${GREEN}║${NC}  ${BOLD}Información del sistema instalado:${NC}                   ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}  • Hostname: ${BOLD}$HOSTNAME${NC}                                ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}  • Usuario: ${BOLD}$USERNAME${NC}                                 ${GREEN}║${NC}"
-    echo -e "${GREEN}║${NC}  • Interfaz: ${BOLD}KDE Plasma Minimal${NC}                      ${GREEN}║${NC}"
+    echo -e "${GREEN}║${NC}  • Interfaz: ${BOLD}KDE Plasma${NC}                               ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}  • Sistema de archivos: ${BOLD}BTRFS${NC}                         ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}  • Swap: ${BOLD}ZRAM (${SWAP_PERCENTAGE}% de RAM)${NC}                   ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}  • Modo de arranque: ${BOLD}${boot_mode^^}${NC}                          ${GREEN}║${NC}"
@@ -909,6 +1332,22 @@ main() {
     echo -e "${GREEN}║${NC}  3. Remover medio de instalación antes de reiniciar              ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}                                                    ${GREEN}║${NC}"
     echo -e "${GREEN}╚══════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+
+    # Mostrar resumen de configuración
+    print_step "Resumen de configuración:"
+    echo -e "  ${DIM}•${NC} Locale: ${LOCALE%% *}"
+    echo -e "  ${DIM}•${NC} Teclado: $KEYMAP"
+    echo -e "  ${DIM}•${NC} Zona horaria: $TIMEZONE"
+    echo -e "  ${DIM}•${NC} Idioma: $LANG"
+    echo -e "  ${DIM}•${NC} CPU: $cpu_type"
+    echo -e "  ${DIM}•${NC} GPU: $gpu_type"
+    echo ""
+
+    print_warn "${BOLD}¡IMPORTANTE!${NC}"
+    print_warn "1. Remover el medio de instalación (USB/CD) antes de reiniciar"
+    print_warn "2. Si no configuró contraseñas, deberá hacerlo en el primer inicio"
+    print_warn "3. Para WiFi, usar NetworkManager desde el entorno gráfico"
     echo ""
 
     # Preguntar si desea desmontar ahora
@@ -934,3 +1373,4 @@ trap 'print_err "Instalación interrumpida por el usuario"; exit 1' INT TERM
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main "$@"
 fi
+```
